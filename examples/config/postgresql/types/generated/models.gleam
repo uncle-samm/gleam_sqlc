@@ -26,7 +26,7 @@ pub fn c_enum_from_string(s: String) -> Result(CEnum, Nil) {
 }
 
 pub type PostgresNumericType {
-  PostgresNumericType(c_boolean: Option(Bool), c_bit: Option(String), c_smallint: Option(Int), c_integer: Option(Int), c_bigint: Option(Int), c_decimal: Option(String), c_numeric: Option(String), c_real: Option(Float), c_double_precision: Option(Float), c_money: Option(String))
+  PostgresNumericType(c_boolean: Option(Bool), c_bit: Option(#(Int, BitArray)), c_smallint: Option(Int), c_integer: Option(Int), c_bigint: Option(Int), c_decimal: Option(String), c_numeric: Option(String), c_real: Option(Float), c_double_precision: Option(Float), c_money: Option(Int))
 }
 
 pub type PostgresStringType {
@@ -34,19 +34,19 @@ pub type PostgresStringType {
 }
 
 pub type PostgresDatetimeType {
-  PostgresDatetimeType(c_date: Option(Int), c_time: Option(String), c_timestamp: Option(Int), c_timestamp_with_tz: Option(Int), c_interval: Option(String), c_timestamp_noda_instant_override: Option(Int))
+  PostgresDatetimeType(c_date: Option(Int), c_time: Option(Int), c_timestamp: Option(Int), c_timestamp_with_tz: Option(Int), c_interval: Option(#(Int, Int, Int)), c_timestamp_noda_instant_override: Option(Int))
 }
 
 pub type PostgresNetworkType {
-  PostgresNetworkType(c_cidr: Option(String), c_inet: Option(String), c_macaddr: Option(String), c_macaddr8: Option(String))
+  PostgresNetworkType(c_cidr: Option(#(Int, BitArray, Int)), c_inet: Option(#(Int, BitArray, Int)), c_macaddr: Option(BitArray), c_macaddr8: Option(BitArray))
 }
 
 pub type PostgresArrayType {
-  PostgresArrayType(c_bytea: Option(BitArray), c_boolean_array: Option(List(Bool)), c_text_array: Option(List(String)), c_integer_array: Option(List(Int)), c_decimal_array: Option(List(String)), c_date_array: Option(List(Int)), c_timestamp_array: Option(List(Int)))
+  PostgresArrayType(c_bytea: Option(BitArray), c_boolean_array: Option(String), c_text_array: Option(String), c_integer_array: Option(String), c_decimal_array: Option(String), c_date_array: Option(String), c_timestamp_array: Option(String))
 }
 
 pub type PostgresGeometricType {
-  PostgresGeometricType(c_point: Option(String), c_line: Option(String), c_lseg: Option(String), c_box: Option(String), c_path: Option(String), c_polygon: Option(String), c_circle: Option(String))
+  PostgresGeometricType(c_point: Option(#(Float, Float)), c_line: Option(#(Float, Float, Float)), c_lseg: Option(#(Float, Float, Float, Float)), c_box: Option(#(Float, Float, Float, Float)), c_path: Option(#(Bool, List(#(Float, Float)))), c_polygon: Option(List(#(Float, Float))), c_circle: Option(#(Float, Float, Float)))
 }
 
 pub type PostgresSpecialType {

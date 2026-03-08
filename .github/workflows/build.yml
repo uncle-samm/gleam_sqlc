@@ -79,14 +79,17 @@ jobs:
         run: |
           SHA=$(shasum -a 256 target/wasm32-wasip1/release/sqlc-gen-gleam.wasm | cut -d ' ' -f 1)
           sed -i "s/sha256: .*/sha256: $SHA/" examples/authors/sqlc.yaml
+          sed -i "s/sha256: .*/sha256: $SHA/" examples/config/sqlc.yaml
           sed -i "s/sha256: .*/sha256: \"$SHA\"/" end2end/sqlc.yaml
 
       - name: Regenerate examples
-        run: cd examples/authors && sqlc generate
+        run: |
+          cd examples/authors && sqlc generate
+          cd ../config && sqlc generate
 
       - name: Regenerate E2E code
         run: cd end2end && sqlc generate
 
-      - name: Check no diff after regeneration
+      - name: Check no diff in generated code
         run: |
-          git diff --exit-code examples/ end2end/gleam_test_project/src/generated/
+          git diff --exit-code -- '*.gleam'
