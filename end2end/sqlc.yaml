@@ -1,0 +1,47 @@
+version: "2"
+plugins:
+  - name: gleam
+    wasm:
+      url: file://../target/wasm32-wasip1/release/sqlc-gen-gleam.wasm
+      sha256: "b343d049d30068496a3e2299da13482161fe19fc48ba53e10b3e248801251b00"
+sql:
+  - schema:
+      - "../examples/config/postgresql/authors/schema.sql"
+      - "../examples/config/postgresql/types/schema.sql"
+    queries:
+      - "../examples/config/postgresql/authors/query.sql"
+      - "../examples/config/postgresql/types/query.sql"
+    engine: "postgresql"
+    codegen:
+      - plugin: gleam
+        out: "gleam_test_project/src/generated"
+        options:
+          overrides:
+            - column: "GetPostgresFunctions:max_timestamp"
+              gleamType:
+                type: "Int"
+                notNull: true
+  - schema:
+      - "../examples/config/sqlite/authors/schema.sql"
+      - "../examples/config/sqlite/types/schema.sql"
+    queries:
+      - "../examples/config/sqlite/authors/query.sql"
+      - "../examples/config/sqlite/types/query.sql"
+    engine: "sqlite"
+    codegen:
+      - plugin: gleam
+        out: "gleam_sqlite_test_project/src/generated"
+        options:
+          overrides:
+            - column: "GetSqliteFunctions:max_integer"
+              gleamType:
+                type: "Int"
+                notNull: false
+            - column: "GetSqliteFunctions:max_real"
+              gleamType:
+                type: "Float"
+                notNull: false
+            - column: "GetSqliteFunctions:max_text"
+              gleamType:
+                type: "String"
+                notNull: true

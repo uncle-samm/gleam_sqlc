@@ -1,0 +1,4 @@
+[tools]
+rust = "latest"
+sqlc = "1.30.0"
+protoc = "29.6"

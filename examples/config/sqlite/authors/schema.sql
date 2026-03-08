@@ -1,0 +1,13 @@
+CREATE TABLE authors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    bio TEXT
+);
+
+CREATE TABLE books (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    author_id INTEGER NOT NULL,
+    description TEXT,
+    FOREIGN KEY (author_id) REFERENCES authors (id) ON DELETE CASCADE
+);

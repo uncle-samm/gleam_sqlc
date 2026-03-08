@@ -1,0 +1,17 @@
+services:
+  postgresdb:
+    container_name: sqlc_e2e_postgres
+    build:
+      context: ..
+      dockerfile: end2end/postgres.Dockerfile
+    restart: always
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sqlc_test}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    healthcheck:
+      test: "pg_isready -d sqlc_test"
+      timeout: 20s
+      retries: 10
