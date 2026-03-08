@@ -27,7 +27,7 @@ pub struct GleamTypeOverride {
 }
 
 fn default_postgleam_version() -> String {
-    "0.3.0".to_string()
+    "0.6.0".to_string()
 }
 
 impl Options {

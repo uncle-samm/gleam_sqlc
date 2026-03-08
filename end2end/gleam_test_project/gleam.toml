@@ -4,7 +4,7 @@ target = "erlang"
 
 [dependencies]
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
-postgleam = ">= 0.5.1"
+postgleam = ">= 0.6.0"
 
 [dev-dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"
