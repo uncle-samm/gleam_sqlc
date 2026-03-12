@@ -1,5 +1,5 @@
 use crate::codegen::TableMap;
-use crate::driver::query_gen::generate_query_fn;
+use crate::driver::query_gen::{build_insert_param_map, generate_query_fn};
 use crate::driver::traits::Driver;
 use crate::options::TypeOverride;
 use crate::plugin::plugin::{Column, Query};
@@ -14,6 +14,10 @@ fn is_nullable_in_source(col: &Column, table_map: &TableMap) -> bool {
     } else {
         &col.name
     };
+
+    if col_name.is_empty() {
+        return false;
+    }
 
     // Try table reference first
     if let Some(ref table_ref) = col.table {
@@ -39,6 +43,31 @@ fn is_nullable_in_source(col: &Column, table_map: &TableMap) -> bool {
         if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
             if !orig_col.not_null {
                 return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a parameter has a nullable target in an INSERT query.
+/// Used when sqlc strips column name/table from cast params (e.g., `$5::uuid`).
+fn is_insert_param_nullable(param: &crate::plugin::plugin::Parameter, query: &Query, table_map: &TableMap) -> bool {
+    let col = match &param.column {
+        Some(c) => c,
+        None => return false,
+    };
+    // Only applies when the column name is missing (cast params)
+    if !col.name.is_empty() || !col.original_name.is_empty() {
+        return false;
+    }
+    let insert_map = build_insert_param_map(&query.text, &query.insert_into_table);
+    if let Some(col_name) = insert_map.get(&param.number) {
+        if let Some(ref table_id) = query.insert_into_table {
+            let table = table_map.get(&table_id.name);
+            if let Some(table) = table {
+                if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
+                    return !orig_col.not_null;
+                }
             }
         }
     }
@@ -72,7 +101,9 @@ pub fn generate_queries(queries: &[&Query], _module_name: &str, table_map: &Tabl
                 // Check both sqlc's not_null and the source table column's nullability.
                 // sqlc may mark param columns as not_null even when the target column
                 // is nullable (e.g., `$5::uuid` for a nullable UUID column).
-                if !col.not_null || is_nullable_in_source(col, table_map) {
+                // Also check INSERT param mapping for cast params with stripped names.
+                if !col.not_null || is_nullable_in_source(col, table_map)
+                    || is_insert_param_nullable(param, query, table_map) {
                     needs_option = true;
                 }
                 if col.is_array {

@@ -5,7 +5,7 @@ use crate::driver::traits::Driver;
 use crate::driver::type_map::ResolvedType;
 use crate::generators::naming::{column_to_field_name, escape_reserved, query_to_fn_name, to_pascal_case};
 use crate::options::TypeOverride;
-use crate::plugin::plugin::{Column, Query};
+use crate::plugin::plugin::{Column, Identifier, Query};
 use crate::utils::CodeWriter;
 
 struct ParamInfo {
@@ -26,7 +26,7 @@ pub fn generate_query_fn(query: &Query, table_map: &TableMap, overrides: &[TypeO
     let fn_name = escape_reserved(&query_to_fn_name(&query.name));
     let cmd = query.cmd.as_str();
 
-    let params = resolve_params(&query.params, &query.text, table_map, driver);
+    let params = resolve_params(&query.params, &query.text, table_map, &query.insert_into_table, driver);
     let columns = resolve_columns(&query.columns, table_map, &query.name, overrides, driver);
     let has_slices = params.iter().any(|p| p.is_slice);
 
@@ -102,10 +102,20 @@ pub fn generate_query_fn(query: &Query, table_map: &TableMap, overrides: &[TypeO
     w.line("}");
 }
 
-fn resolve_params(params: &[crate::plugin::plugin::Parameter], sql_text: &str, table_map: &TableMap, driver: &dyn Driver) -> Vec<ParamInfo> {
+fn resolve_params(
+    params: &[crate::plugin::plugin::Parameter],
+    sql_text: &str,
+    table_map: &TableMap,
+    insert_into_table: &Option<Identifier>,
+    driver: &dyn Driver,
+) -> Vec<ParamInfo> {
     // Extract slice marker names from the SQL text: /*SLICE:xxx*/?
     let slice_markers = extract_slice_markers(sql_text);
     let mut slice_idx = 0;
+
+    // For INSERT queries where sqlc strips column names from cast params (e.g. $5::uuid),
+    // build a mapping from $N -> column name by parsing the INSERT column list and VALUES.
+    let insert_param_names = build_insert_param_map(sql_text, insert_into_table);
 
     params
         .iter()
@@ -114,10 +124,19 @@ fn resolve_params(params: &[crate::plugin::plugin::Parameter], sql_text: &str, t
             let col = p.column.as_ref().unwrap();
             let is_slice = col.is_sqlc_slice;
 
+            // Try to recover the column name from the INSERT mapping if sqlc stripped it
+            let recovered_name = if col.name.is_empty() && col.original_name.is_empty() {
+                insert_param_names.get(&p.number).cloned()
+            } else {
+                None
+            };
+
             let raw_name = if !col.original_name.is_empty() {
                 column_to_field_name(&col.original_name)
             } else if !col.name.is_empty() {
                 column_to_field_name(&col.name)
+            } else if let Some(ref name) = recovered_name {
+                column_to_field_name(name)
             } else {
                 format!("param_{}", i + 1)
             };
@@ -131,11 +150,20 @@ fn resolve_params(params: &[crate::plugin::plugin::Parameter], sql_text: &str, t
             };
 
             // Restore nullability from the source table column.
-            // sqlc marks parameter columns as not_null based on the parameter position
-            // (a value is being provided), but the target column may actually be nullable.
-            // For example, `$5::uuid` targeting a nullable `project_id UUID` column
-            // should generate `Option(String)`, not `String`.
-            let effective_col = restore_nullability(col, table_map);
+            // If we recovered a column name from the INSERT mapping, inject it into the
+            // column so restore_nullability can look it up in the table catalog.
+            let effective_col = if let Some(ref name) = recovered_name {
+                let mut patched = col.clone();
+                patched.name = name.clone();
+                if patched.table.is_none() {
+                    if let Some(table_id) = insert_into_table {
+                        patched.table = Some(table_id.clone());
+                    }
+                }
+                restore_nullability(&patched, table_map)
+            } else {
+                restore_nullability(col, table_map)
+            };
             let mut resolved = driver.resolve_param_type(&effective_col);
 
             // For slice params, wrap the type in List() and change the param expression
@@ -227,6 +255,117 @@ fn resolve_columns(columns: &[Column], table_map: &TableMap, query_name: &str, o
     }
 
     result
+}
+
+/// For INSERT queries, build a mapping from parameter number ($1, $2, ...) to the
+/// corresponding column name in the INSERT column list.
+///
+/// Parses: `INSERT INTO table (col1, col2, col3) VALUES ($1, func(), $2::type, $3)`
+/// Returns: {1 -> "col1", 2 -> "col3", 3 -> "col3"} (only entries for $N params)
+///
+/// This handles the case where sqlc strips column name/table info from cast params
+/// (e.g., `$5::uuid` loses its `project_id` identity).
+pub fn build_insert_param_map(sql: &str, insert_table: &Option<Identifier>) -> HashMap<i32, String> {
+    let mut map = HashMap::new();
+
+    // Only relevant for INSERT queries with a known target table
+    if insert_table.is_none() {
+        return map;
+    }
+
+    let sql_upper = sql.to_uppercase();
+    let sql_norm = sql.replace('\n', " ");
+
+    // Find the INSERT column list: everything between first (...) after INSERT INTO table
+    let insert_pos = sql_upper.find("INSERT INTO");
+    if insert_pos.is_none() {
+        return map;
+    }
+
+    // Find the column list parentheses
+    let after_insert = &sql_norm[insert_pos.unwrap()..];
+    let col_open = match after_insert.find('(') {
+        Some(p) => insert_pos.unwrap() + p,
+        None => return map,
+    };
+    let col_close = match sql_norm[col_open..].find(')') {
+        Some(p) => col_open + p,
+        None => return map,
+    };
+    let col_list: Vec<&str> = sql_norm[col_open + 1..col_close]
+        .split(',')
+        .map(|s| s.trim())
+        .collect();
+
+    // Find the VALUES list
+    let values_pos = sql_upper.find("VALUES");
+    if values_pos.is_none() {
+        return map;
+    }
+    let after_values = &sql_norm[values_pos.unwrap()..];
+    let val_open = match after_values.find('(') {
+        Some(p) => values_pos.unwrap() + p,
+        None => return map,
+    };
+    // Handle nested parens in VALUES (e.g., gen_random_uuid())
+    let mut depth = 0;
+    let mut val_close = None;
+    for (j, ch) in sql_norm[val_open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    val_close = Some(val_open + j);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let val_close = match val_close {
+        Some(p) => p,
+        None => return map,
+    };
+
+    // Split values by comma, respecting nested parentheses
+    let values_str = &sql_norm[val_open + 1..val_close];
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth = 0;
+    for ch in values_str.chars() {
+        match ch {
+            '(' => { paren_depth += 1; current.push(ch); }
+            ')' => { paren_depth -= 1; current.push(ch); }
+            ',' if paren_depth == 0 => {
+                values.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        values.push(current.trim().to_string());
+    }
+
+    // Match each value expression to its column name
+    if col_list.len() != values.len() {
+        return map;
+    }
+
+    for (idx, val) in values.iter().enumerate() {
+        // Extract $N from the value (may have ::cast suffix like "$5::uuid")
+        let trimmed = val.trim();
+        if trimmed.starts_with('$') {
+            // Parse the number after $, stopping at non-digit (e.g., ::cast)
+            let num_str: String = trimmed[1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(num) = num_str.parse::<i32>() {
+                map.insert(num, col_list[idx].to_string());
+            }
+        }
+    }
+
+    map
 }
 
 /// If a column has a source table reference, look up the original column definition
@@ -791,6 +930,125 @@ mod tests {
         assert!(
             output.contains("postgleam.nullable(bio, postgleam.text)"),
             "Expected postgleam.nullable(bio, postgleam.text), got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_insert_cast_params_recover_nullability() {
+        // Mirrors the real sqlc behavior: for `$5::uuid` targeting a nullable column,
+        // sqlc sends params with empty name, empty original_name, and no table reference.
+        // The fix uses the INSERT column list to recover the column name.
+        let table_columns = vec![
+            make_column("id", "uuid", true),
+            make_column("user_id", "text", true),
+            make_column("title", "text", true),
+            make_column("model", "text", false),       // nullable
+            make_column("project_id", "uuid", false),  // nullable
+            make_column("task_id", "uuid", false),      // nullable
+        ];
+        let table_map = make_table_map("threads", table_columns);
+
+        // Simulate what sqlc actually sends: params 5 and 6 have empty name/table
+        let query = Query {
+            text: "INSERT INTO threads (id, user_id, title, model, project_id, task_id) VALUES (gen_random_uuid(), $1, $2, $3, $4::uuid, $5::uuid) RETURNING *".into(),
+            name: "CreateThread".into(),
+            cmd: ":one".into(),
+            columns: vec![],
+            params: vec![
+                Parameter {
+                    number: 1,
+                    column: Some(make_param_column("user_id", "text", true, "threads")),
+                },
+                Parameter {
+                    number: 2,
+                    column: Some(make_param_column("title", "text", true, "threads")),
+                },
+                Parameter {
+                    number: 3,
+                    // model is nullable but sqlc provides the name, so restore_nullability handles it
+                    column: Some(make_param_column("model", "text", false, "threads")),
+                },
+                Parameter {
+                    number: 4,
+                    // sqlc strips name and table for cast params
+                    column: Some(Column {
+                        name: String::new(),
+                        original_name: String::new(),
+                        not_null: true,
+                        r#type: Some(Identifier {
+                            catalog: String::new(),
+                            schema: String::new(),
+                            name: "uuid".into(),
+                        }),
+                        table: None,
+                        ..Default::default()
+                    }),
+                },
+                Parameter {
+                    number: 5,
+                    column: Some(Column {
+                        name: String::new(),
+                        original_name: String::new(),
+                        not_null: true,
+                        r#type: Some(Identifier {
+                            catalog: String::new(),
+                            schema: String::new(),
+                            name: "uuid".into(),
+                        }),
+                        table: None,
+                        ..Default::default()
+                    }),
+                },
+            ],
+            comments: vec![],
+            filename: "threads.sql".into(),
+            insert_into_table: Some(Identifier {
+                catalog: String::new(),
+                schema: String::new(),
+                name: "threads".into(),
+            }),
+        };
+
+        let options = Options {
+            uuid_as_string: true,
+            ..Default::default()
+        };
+        let driver = PostgresDriver::new(&options);
+
+        let mut w = CodeWriter::new();
+        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let output = w.into_string();
+
+        // project_id and task_id should be recovered as Option(String)
+        assert!(
+            output.contains("project_id: Option(String)"),
+            "Expected project_id: Option(String) recovered from INSERT mapping, got:\n{output}"
+        );
+        assert!(
+            output.contains("task_id: Option(String)"),
+            "Expected task_id: Option(String) recovered from INSERT mapping, got:\n{output}"
+        );
+
+        // Should use nullable() for these params
+        assert!(
+            output.contains("postgleam.nullable("),
+            "Expected postgleam.nullable() for nullable INSERT params, got:\n{output}"
+        );
+
+        // user_id and title should remain non-optional
+        assert!(
+            output.contains("user_id: String"),
+            "Expected user_id: String (non-optional), got:\n{output}"
+        );
+        assert!(
+            output.contains("title: String"),
+            "Expected title: String (non-optional), got:\n{output}"
+        );
+
+        // model should already be Option (sqlc provided it as not_null=false)
+        assert!(
+            output.contains("model: Option(String)"),
+            "Expected model: Option(String), got:\n{output}"
         );
     }
 }
