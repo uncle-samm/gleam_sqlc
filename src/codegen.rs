@@ -35,15 +35,17 @@ pub fn generate(request: GenerateRequest) -> GenerateResponse {
     // Build table map for embed resolution
     let table_map = build_table_map(request.catalog.as_ref());
 
-    // Generate models from catalog
-    if let Some(ref catalog) = request.catalog {
-        let has_tables = catalog.schemas.iter().any(|s| !s.tables.is_empty());
-        if has_tables {
-            let models_code = generate_models(catalog, driver.as_ref());
-            files.push(File {
-                name: "models.gleam".into(),
-                contents: models_code.into_bytes(),
-            });
+    // Generate models from catalog (unless skipModels is set)
+    if !options.skip_models {
+        if let Some(ref catalog) = request.catalog {
+            let has_tables = catalog.schemas.iter().any(|s| !s.tables.is_empty());
+            if has_tables {
+                let models_code = generate_models(catalog, driver.as_ref());
+                files.push(File {
+                    name: "models.gleam".into(),
+                    contents: models_code.into_bytes(),
+                });
+            }
         }
     }
 

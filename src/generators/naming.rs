@@ -2,8 +2,8 @@
 /// Handles snake_case ("get_author" -> "GetAuthor"), already-PascalCase ("GetAuthor" -> "GetAuthor"),
 /// and camelCase ("listAuthors" -> "ListAuthors").
 pub fn to_pascal_case(s: &str) -> String {
-    // First split on underscores
-    let words: Vec<&str> = s.split('_').filter(|p| !p.is_empty()).collect();
+    // Split on underscores and hyphens
+    let words: Vec<&str> = s.split(|c| c == '_' || c == '-').filter(|p| !p.is_empty()).collect();
 
     words
         .iter()
@@ -130,6 +130,10 @@ mod tests {
         assert_eq!(to_pascal_case("my_table_name"), "MyTableName");
         assert_eq!(to_pascal_case("id"), "Id");
         assert_eq!(to_pascal_case("postgres_numeric_types"), "PostgresNumericTypes");
+        // Hyphenated
+        assert_eq!(to_pascal_case("claude-code"), "ClaudeCode");
+        assert_eq!(to_pascal_case("api-key"), "ApiKey");
+        assert_eq!(to_pascal_case("session-token"), "SessionToken");
         // Already PascalCase
         assert_eq!(to_pascal_case("GetAuthor"), "GetAuthor");
         assert_eq!(to_pascal_case("ListAuthors"), "ListAuthors");

@@ -11,6 +11,8 @@ pub struct PostgresDriver {
     alias: String,
     /// Full decode import path, e.g., "postgleam/decode" or "db/pg/decode"
     decode_import: String,
+    /// Map uuid → String (text param/decoder) instead of BitArray
+    uuid_as_string: bool,
 }
 
 impl PostgresDriver {
@@ -28,6 +30,7 @@ impl PostgresDriver {
             import,
             alias,
             decode_import,
+            uuid_as_string: options.uuid_as_string,
         }
     }
 }
@@ -51,7 +54,7 @@ impl Driver for PostgresDriver {
             .as_ref()
             .map(|t| t.name.as_str())
             .unwrap_or("text");
-        let base = pg_type_to_gleam(col_type, &self.alias);
+        let base = pg_type_to_gleam(col_type, &self.alias, self.uuid_as_string);
         let is_nullable = !col.not_null;
 
         if col.is_array {
@@ -132,7 +135,7 @@ impl Driver for PostgresDriver {
                 .as_ref()
                 .map(|t| t.name.as_str())
                 .unwrap_or("text");
-            let base = pg_type_to_gleam(col_type, &self.alias);
+            let base = pg_type_to_gleam(col_type, &self.alias, self.uuid_as_string);
             let is_nullable = !col.not_null;
 
             // Only support arity-1 element types for array params.
@@ -183,7 +186,7 @@ impl Driver for PostgresDriver {
 /// Map a PostgreSQL type name to Gleam type info.
 /// The `module` parameter is the module alias used in param constructors
 /// (e.g., "postgleam" or "pg").
-fn pg_type_to_gleam(pg_type: &str, module: &str) -> GleamType {
+fn pg_type_to_gleam(pg_type: &str, module: &str, uuid_as_string: bool) -> GleamType {
     // Strip pg_catalog. prefix if present
     let type_name = pg_type
         .strip_prefix("pg_catalog.")
@@ -228,7 +231,13 @@ fn pg_type_to_gleam(pg_type: &str, module: &str) -> GleamType {
         "bytea" => GleamType::simple("BitArray", &format!("{module}.bytea"), "decode.bytea"),
 
         // UUID
-        "uuid" => GleamType::simple("BitArray", &format!("{module}.uuid"), "decode.uuid"),
+        "uuid" => {
+            if uuid_as_string {
+                GleamType::simple("String", &format!("{module}.text"), "decode.text")
+            } else {
+                GleamType::simple("BitArray", &format!("{module}.uuid"), "decode.uuid")
+            }
+        }
 
         // JSON
         "json" => GleamType::simple("String", &format!("{module}.json"), "decode.json"),
@@ -317,80 +326,80 @@ mod tests {
 
     #[test]
     fn test_basic_types() {
-        let t = pg_type_to_gleam("bool", "postgleam");
+        let t = pg_type_to_gleam("bool", "postgleam", false);
         assert_eq!(t.type_name, "Bool");
         assert_eq!(t.param_fn, "postgleam.bool");
         assert_eq!(t.decoder_fn, "decode.bool");
         assert_eq!(t.param_arity, 1);
 
-        let t = pg_type_to_gleam("int4", "postgleam");
+        let t = pg_type_to_gleam("int4", "postgleam", false);
         assert_eq!(t.type_name, "Int");
 
-        let t = pg_type_to_gleam("text", "postgleam");
+        let t = pg_type_to_gleam("text", "postgleam", false);
         assert_eq!(t.type_name, "String");
 
-        let t = pg_type_to_gleam("float8", "postgleam");
+        let t = pg_type_to_gleam("float8", "postgleam", false);
         assert_eq!(t.type_name, "Float");
 
-        let t = pg_type_to_gleam("uuid", "postgleam");
+        let t = pg_type_to_gleam("uuid", "postgleam", false);
         assert_eq!(t.type_name, "BitArray");
 
-        let t = pg_type_to_gleam("jsonb", "postgleam");
+        let t = pg_type_to_gleam("jsonb", "postgleam", false);
         assert_eq!(t.type_name, "String");
         assert_eq!(t.param_fn, "postgleam.jsonb");
 
-        let t = pg_type_to_gleam("timestamptz", "postgleam");
+        let t = pg_type_to_gleam("timestamptz", "postgleam", false);
         assert_eq!(t.type_name, "Int");
         assert_eq!(t.param_fn, "postgleam.timestamptz");
     }
 
     #[test]
     fn test_custom_module() {
-        let t = pg_type_to_gleam("bool", "pg");
+        let t = pg_type_to_gleam("bool", "pg", false);
         assert_eq!(t.param_fn, "pg.bool");
         assert_eq!(t.decoder_fn, "decode.bool");
 
-        let t = pg_type_to_gleam("int4", "pg");
+        let t = pg_type_to_gleam("int4", "pg", false);
         assert_eq!(t.param_fn, "pg.int");
 
-        let t = pg_type_to_gleam("text", "pg");
+        let t = pg_type_to_gleam("text", "pg", false);
         assert_eq!(t.param_fn, "pg.text");
 
-        let t = pg_type_to_gleam("jsonb", "pg");
+        let t = pg_type_to_gleam("jsonb", "pg", false);
         assert_eq!(t.param_fn, "pg.jsonb");
     }
 
     #[test]
     fn test_pg_catalog_prefix() {
-        let t = pg_type_to_gleam("pg_catalog.int4", "postgleam");
+        let t = pg_type_to_gleam("pg_catalog.int4", "postgleam", false);
         assert_eq!(t.type_name, "Int");
 
-        let t = pg_type_to_gleam("pg_catalog.bool", "postgleam");
+        let t = pg_type_to_gleam("pg_catalog.bool", "postgleam", false);
         assert_eq!(t.type_name, "Bool");
     }
 
     #[test]
     fn test_unknown_type_fallback() {
-        let t = pg_type_to_gleam("some_custom_type", "postgleam");
+        let t = pg_type_to_gleam("some_custom_type", "postgleam", false);
         assert_eq!(t.type_name, "String");
         assert_eq!(t.param_fn, "postgleam.text");
     }
 
     #[test]
     fn test_time_types() {
-        let t = pg_type_to_gleam("time", "postgleam");
+        let t = pg_type_to_gleam("time", "postgleam", false);
         assert_eq!(t.type_name, "Int");
         assert_eq!(t.param_fn, "postgleam.time");
         assert_eq!(t.decoder_fn, "decode.time");
         assert_eq!(t.param_arity, 1);
 
-        let t = pg_type_to_gleam("timetz", "postgleam");
+        let t = pg_type_to_gleam("timetz", "postgleam", false);
         assert_eq!(t.type_name, "#(Int, Int)");
         assert_eq!(t.param_fn, "postgleam.timetz");
         assert_eq!(t.decoder_fn, "decode.timetz");
         assert_eq!(t.param_arity, 2);
 
-        let t = pg_type_to_gleam("interval", "postgleam");
+        let t = pg_type_to_gleam("interval", "postgleam", false);
         assert_eq!(t.type_name, "#(Int, Int, Int)");
         assert_eq!(t.param_fn, "postgleam.interval");
         assert_eq!(t.decoder_fn, "decode.interval");
@@ -399,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_money_type() {
-        let t = pg_type_to_gleam("money", "postgleam");
+        let t = pg_type_to_gleam("money", "postgleam", false);
         assert_eq!(t.type_name, "Int");
         assert_eq!(t.param_fn, "postgleam.money");
         assert_eq!(t.decoder_fn, "decode.money");
@@ -407,12 +416,12 @@ mod tests {
 
     #[test]
     fn test_xml_jsonpath() {
-        let t = pg_type_to_gleam("xml", "postgleam");
+        let t = pg_type_to_gleam("xml", "postgleam", false);
         assert_eq!(t.type_name, "String");
         assert_eq!(t.param_fn, "postgleam.xml");
         assert_eq!(t.decoder_fn, "decode.xml");
 
-        let t = pg_type_to_gleam("jsonpath", "postgleam");
+        let t = pg_type_to_gleam("jsonpath", "postgleam", false);
         assert_eq!(t.type_name, "String");
         assert_eq!(t.param_fn, "postgleam.jsonpath");
         assert_eq!(t.decoder_fn, "decode.jsonpath");
@@ -420,42 +429,42 @@ mod tests {
 
     #[test]
     fn test_geometric_types() {
-        let t = pg_type_to_gleam("point", "postgleam");
+        let t = pg_type_to_gleam("point", "postgleam", false);
         assert_eq!(t.type_name, "#(Float, Float)");
         assert_eq!(t.param_fn, "postgleam.point");
         assert_eq!(t.decoder_fn, "decode.point");
         assert_eq!(t.param_arity, 2);
 
-        let t = pg_type_to_gleam("circle", "postgleam");
+        let t = pg_type_to_gleam("circle", "postgleam", false);
         assert_eq!(t.type_name, "#(Float, Float, Float)");
         assert_eq!(t.param_fn, "postgleam.circle");
         assert_eq!(t.decoder_fn, "decode.circle");
         assert_eq!(t.param_arity, 3);
 
-        let t = pg_type_to_gleam("line", "postgleam");
+        let t = pg_type_to_gleam("line", "postgleam", false);
         assert_eq!(t.type_name, "#(Float, Float, Float)");
         assert_eq!(t.param_fn, "postgleam.line");
         assert_eq!(t.decoder_fn, "decode.line");
         assert_eq!(t.param_arity, 3);
 
-        let t = pg_type_to_gleam("lseg", "postgleam");
+        let t = pg_type_to_gleam("lseg", "postgleam", false);
         assert_eq!(t.type_name, "#(Float, Float, Float, Float)");
         assert_eq!(t.param_fn, "postgleam.lseg");
         assert_eq!(t.decoder_fn, "decode.lseg");
         assert_eq!(t.param_arity, 4);
 
-        let t = pg_type_to_gleam("box", "postgleam");
+        let t = pg_type_to_gleam("box", "postgleam", false);
         assert_eq!(t.param_fn, "postgleam.box");
         assert_eq!(t.decoder_fn, "decode.box");
         assert_eq!(t.param_arity, 4);
 
-        let t = pg_type_to_gleam("path", "postgleam");
+        let t = pg_type_to_gleam("path", "postgleam", false);
         assert_eq!(t.type_name, "#(Bool, List(#(Float, Float)))");
         assert_eq!(t.param_fn, "postgleam.path");
         assert_eq!(t.decoder_fn, "decode.path");
         assert_eq!(t.param_arity, 2);
 
-        let t = pg_type_to_gleam("polygon", "postgleam");
+        let t = pg_type_to_gleam("polygon", "postgleam", false);
         assert_eq!(t.type_name, "List(#(Float, Float))");
         assert_eq!(t.param_fn, "postgleam.polygon");
         assert_eq!(t.decoder_fn, "decode.polygon");
@@ -463,23 +472,23 @@ mod tests {
 
     #[test]
     fn test_network_types() {
-        let t = pg_type_to_gleam("macaddr", "postgleam");
+        let t = pg_type_to_gleam("macaddr", "postgleam", false);
         assert_eq!(t.type_name, "BitArray");
         assert_eq!(t.param_fn, "postgleam.macaddr");
         assert_eq!(t.decoder_fn, "decode.macaddr");
 
-        let t = pg_type_to_gleam("macaddr8", "postgleam");
+        let t = pg_type_to_gleam("macaddr8", "postgleam", false);
         assert_eq!(t.type_name, "BitArray");
         assert_eq!(t.param_fn, "postgleam.macaddr8");
         assert_eq!(t.decoder_fn, "decode.macaddr8");
 
-        let t = pg_type_to_gleam("inet", "postgleam");
+        let t = pg_type_to_gleam("inet", "postgleam", false);
         assert_eq!(t.type_name, "#(Int, BitArray, Int)");
         assert_eq!(t.param_fn, "postgleam.inet");
         assert_eq!(t.decoder_fn, "decode.inet");
         assert_eq!(t.param_arity, 3);
 
-        let t = pg_type_to_gleam("cidr", "postgleam");
+        let t = pg_type_to_gleam("cidr", "postgleam", false);
         assert_eq!(t.type_name, "#(Int, BitArray, Int)");
         assert_eq!(t.param_fn, "postgleam.inet");
         assert_eq!(t.decoder_fn, "decode.inet");
@@ -487,13 +496,13 @@ mod tests {
 
     #[test]
     fn test_bit_string_type() {
-        let t = pg_type_to_gleam("bit", "postgleam");
+        let t = pg_type_to_gleam("bit", "postgleam", false);
         assert_eq!(t.type_name, "#(Int, BitArray)");
         assert_eq!(t.param_fn, "postgleam.bit_string");
         assert_eq!(t.decoder_fn, "decode.bit_string");
         assert_eq!(t.param_arity, 2);
 
-        let t = pg_type_to_gleam("varbit", "postgleam");
+        let t = pg_type_to_gleam("varbit", "postgleam", false);
         assert_eq!(t.type_name, "#(Int, BitArray)");
         assert_eq!(t.param_fn, "postgleam.bit_string");
         assert_eq!(t.decoder_fn, "decode.bit_string");
@@ -576,6 +585,19 @@ mod tests {
             ParamExpr::Direct { fn_name } => assert_eq!(fn_name, "pg.text"),
             other => panic!("expected Direct, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_uuid_as_string() {
+        let t = pg_type_to_gleam("uuid", "postgleam", true);
+        assert_eq!(t.type_name, "String");
+        assert_eq!(t.param_fn, "postgleam.text");
+        assert_eq!(t.decoder_fn, "decode.text");
+
+        // Default (false) should still be BitArray
+        let t = pg_type_to_gleam("uuid", "postgleam", false);
+        assert_eq!(t.type_name, "BitArray");
+        assert_eq!(t.param_fn, "postgleam.uuid");
     }
 
     #[test]

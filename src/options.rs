@@ -21,6 +21,17 @@ pub struct Options {
     /// Example: "db/pg/decode" generates `import db/pg/decode`.
     #[serde(default)]
     pub decode_module: Option<String>,
+
+    /// Skip generating models.gleam (enums + table types).
+    /// Useful when you define your own domain types and only want query functions.
+    #[serde(default)]
+    pub skip_models: bool,
+
+    /// Map PostgreSQL `uuid` columns to `String` (with `text` param/decoder)
+    /// instead of `BitArray` (with `uuid` param/decoder).
+    /// Useful when your app passes UUIDs as text strings.
+    #[serde(default)]
+    pub uuid_as_string: bool,
 }
 
 #[derive(Debug, Deserialize)]
