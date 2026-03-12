@@ -7,26 +7,39 @@ use crate::utils::CodeWriter;
 
 /// Check if a column is nullable in its source table definition.
 /// Used to detect when sqlc loses nullability through type casts.
+/// Falls back to searching all tables by column name when table ref is missing.
 fn is_nullable_in_source(col: &Column, table_map: &TableMap) -> bool {
-    let table_ref = match &col.table {
-        Some(t) if !t.name.is_empty() => t,
-        _ => return false,
+    let col_name = if !col.original_name.is_empty() {
+        &col.original_name
+    } else {
+        &col.name
     };
-    let table = table_map.get(&table_ref.name).or_else(|| {
-        if !table_ref.schema.is_empty() {
-            table_map.get(&format!("{}.{}", table_ref.schema, table_ref.name))
-        } else {
-            None
+
+    // Try table reference first
+    if let Some(ref table_ref) = col.table {
+        if !table_ref.name.is_empty() {
+            let table = table_map.get(&table_ref.name).or_else(|| {
+                if !table_ref.schema.is_empty() {
+                    table_map.get(&format!("{}.{}", table_ref.schema, table_ref.name))
+                } else {
+                    None
+                }
+            });
+            if let Some(table) = table {
+                if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
+                    return !orig_col.not_null;
+                }
+            }
+            return false;
         }
-    });
-    if let Some(table) = table {
-        let orig_name = if !col.original_name.is_empty() {
-            &col.original_name
-        } else {
-            &col.name
-        };
-        if let Some(orig_col) = table.columns.iter().find(|c| c.name == *orig_name) {
-            return !orig_col.not_null;
+    }
+
+    // Fallback: search all tables
+    for table in table_map.values() {
+        if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
+            if !orig_col.not_null {
+                return true;
+            }
         }
     }
     false

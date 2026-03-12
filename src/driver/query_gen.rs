@@ -226,42 +226,65 @@ fn resolve_columns(columns: &[Column], table_map: &TableMap, query_name: &str, o
 /// If a column has a source table reference, look up the original column definition
 /// in the catalog to restore its nullability. This fixes the common case where
 /// `nullable_col::text` causes sqlc to mark the result as NOT NULL.
+///
+/// When sqlc strips the table reference (e.g., through type casts), falls back to
+/// searching all tables by column name. If exactly one match is found, uses its
+/// nullability. If multiple matches exist, stays conservative (keeps not_null).
 fn restore_nullability(col: &Column, table_map: &TableMap) -> Column {
     // If already nullable, nothing to restore
     if !col.not_null {
         return col.clone();
     }
 
-    // Need a table reference to look up the original column
-    let table_ref = match &col.table {
-        Some(t) if !t.name.is_empty() => t,
-        _ => return col.clone(),
+    let col_name = if !col.original_name.is_empty() {
+        &col.original_name
+    } else {
+        &col.name
     };
 
-    // Look up the table, trying both plain name and schema-qualified
-    let table = table_map.get(&table_ref.name).or_else(|| {
-        if !table_ref.schema.is_empty() {
-            table_map.get(&format!("{}.{}", table_ref.schema, table_ref.name))
-        } else {
-            None
+    // Try table reference first
+    if let Some(ref table_ref) = col.table {
+        if !table_ref.name.is_empty() {
+            let table = table_map.get(&table_ref.name).or_else(|| {
+                if !table_ref.schema.is_empty() {
+                    table_map.get(&format!("{}.{}", table_ref.schema, table_ref.name))
+                } else {
+                    None
+                }
+            });
+            if let Some(table) = table {
+                if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
+                    if !orig_col.not_null {
+                        let mut fixed = col.clone();
+                        fixed.not_null = false;
+                        return fixed;
+                    }
+                }
+            }
+            return col.clone();
         }
-    });
+    }
 
-    if let Some(table) = table {
-        // Find the original column by name
-        let orig_name = if !col.original_name.is_empty() {
-            &col.original_name
-        } else {
-            &col.name
-        };
-        if let Some(orig_col) = table.columns.iter().find(|c| c.name == *orig_name) {
+    // Fallback: no table reference (common with ::text casts).
+    // Search all tables for a column with this name.
+    let mut nullable_match = false;
+    let mut match_count = 0;
+
+    for table in table_map.values() {
+        if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
+            match_count += 1;
             if !orig_col.not_null {
-                // Original column IS nullable — restore that on the result
-                let mut fixed = col.clone();
-                fixed.not_null = false;
-                return fixed;
+                nullable_match = true;
             }
         }
+    }
+
+    // Only restore nullability if the column name is unambiguous (one table)
+    // or ALL matches agree it's nullable.
+    if match_count > 0 && nullable_match {
+        let mut fixed = col.clone();
+        fixed.not_null = false;
+        return fixed;
     }
 
     col.clone()
