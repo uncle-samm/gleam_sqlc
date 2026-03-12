@@ -69,7 +69,10 @@ pub fn generate_queries(queries: &[&Query], _module_name: &str, table_map: &Tabl
         }
         for param in &query.params {
             if let Some(col) = &param.column {
-                if !col.not_null {
+                // Check both sqlc's not_null and the source table column's nullability.
+                // sqlc may mark param columns as not_null even when the target column
+                // is nullable (e.g., `$5::uuid` for a nullable UUID column).
+                if !col.not_null || is_nullable_in_source(col, table_map) {
                     needs_option = true;
                 }
                 if col.is_array {

@@ -26,7 +26,7 @@ pub fn generate_query_fn(query: &Query, table_map: &TableMap, overrides: &[TypeO
     let fn_name = escape_reserved(&query_to_fn_name(&query.name));
     let cmd = query.cmd.as_str();
 
-    let params = resolve_params(&query.params, &query.text, driver);
+    let params = resolve_params(&query.params, &query.text, table_map, driver);
     let columns = resolve_columns(&query.columns, table_map, &query.name, overrides, driver);
     let has_slices = params.iter().any(|p| p.is_slice);
 
@@ -102,7 +102,7 @@ pub fn generate_query_fn(query: &Query, table_map: &TableMap, overrides: &[TypeO
     w.line("}");
 }
 
-fn resolve_params(params: &[crate::plugin::plugin::Parameter], sql_text: &str, driver: &dyn Driver) -> Vec<ParamInfo> {
+fn resolve_params(params: &[crate::plugin::plugin::Parameter], sql_text: &str, table_map: &TableMap, driver: &dyn Driver) -> Vec<ParamInfo> {
     // Extract slice marker names from the SQL text: /*SLICE:xxx*/?
     let slice_markers = extract_slice_markers(sql_text);
     let mut slice_idx = 0;
@@ -130,7 +130,13 @@ fn resolve_params(params: &[crate::plugin::plugin::Parameter], sql_text: &str, d
                 String::new()
             };
 
-            let mut resolved = driver.resolve_param_type(col);
+            // Restore nullability from the source table column.
+            // sqlc marks parameter columns as not_null based on the parameter position
+            // (a value is being provided), but the target column may actually be nullable.
+            // For example, `$5::uuid` targeting a nullable `project_id UUID` column
+            // should generate `Option(String)`, not `String`.
+            let effective_col = restore_nullability(col, table_map);
+            let mut resolved = driver.resolve_param_type(&effective_col);
 
             // For slice params, wrap the type in List() and change the param expression
             if is_slice {
@@ -548,4 +554,243 @@ fn escape_gleam_string(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::postgres::PostgresDriver;
+    use crate::options::Options;
+    use crate::plugin::plugin::{Column, Identifier, Parameter, Query, Table};
+
+    /// Build a table map with a single table containing the given columns.
+    fn make_table_map(table_name: &str, columns: Vec<Column>) -> TableMap {
+        let mut map = TableMap::new();
+        map.insert(
+            table_name.to_string(),
+            Table {
+                rel: Some(Identifier {
+                    catalog: String::new(),
+                    schema: "public".into(),
+                    name: table_name.into(),
+                }),
+                columns,
+                comment: String::new(),
+            },
+        );
+        map
+    }
+
+    fn make_column(name: &str, type_name: &str, not_null: bool) -> Column {
+        Column {
+            name: name.into(),
+            not_null,
+            r#type: Some(Identifier {
+                catalog: String::new(),
+                schema: String::new(),
+                name: type_name.into(),
+            }),
+            table: Some(Identifier {
+                catalog: String::new(),
+                schema: "public".into(),
+                name: String::new(), // will be set per-usage
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn make_param_column(name: &str, type_name: &str, not_null: bool, table_name: &str) -> Column {
+        Column {
+            name: name.into(),
+            not_null,
+            r#type: Some(Identifier {
+                catalog: String::new(),
+                schema: String::new(),
+                name: type_name.into(),
+            }),
+            table: Some(Identifier {
+                catalog: String::new(),
+                schema: "public".into(),
+                name: table_name.into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_nullable_param_from_table_lookup() {
+        // Schema: threads table with nullable project_id and task_id columns
+        let table_columns = vec![
+            make_column("id", "uuid", true),
+            make_column("user_id", "text", true),
+            make_column("title", "text", true),
+            make_column("project_id", "uuid", false), // nullable
+            make_column("task_id", "uuid", false),     // nullable
+        ];
+        let table_map = make_table_map("threads", table_columns);
+
+        // Query: INSERT with params where sqlc marks them as not_null
+        // even though the target columns are nullable
+        let query = Query {
+            text: "INSERT INTO threads (user_id, title, project_id, task_id) VALUES ($1, $2, $3::uuid, $4::uuid) RETURNING *".into(),
+            name: "CreateThread".into(),
+            cmd: ":one".into(),
+            columns: vec![],
+            params: vec![
+                Parameter {
+                    number: 1,
+                    column: Some(make_param_column("user_id", "text", true, "threads")),
+                },
+                Parameter {
+                    number: 2,
+                    column: Some(make_param_column("title", "text", true, "threads")),
+                },
+                Parameter {
+                    number: 3,
+                    // sqlc marks this as not_null, but actual column is nullable
+                    column: Some(make_param_column("project_id", "uuid", true, "threads")),
+                },
+                Parameter {
+                    number: 4,
+                    // sqlc marks this as not_null, but actual column is nullable
+                    column: Some(make_param_column("task_id", "uuid", true, "threads")),
+                },
+            ],
+            comments: vec![],
+            filename: "threads.sql".into(),
+            insert_into_table: None,
+        };
+
+        let options = Options {
+            uuid_as_string: true,
+            ..Default::default()
+        };
+        let driver = PostgresDriver::new(&options);
+
+        let mut w = CodeWriter::new();
+        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let output = w.into_string();
+
+        // The params type should have Option(String) for project_id and task_id
+        assert!(
+            output.contains("Option(String)"),
+            "Expected Option(String) in params type for nullable columns, got:\n{output}"
+        );
+
+        // The param expressions should use nullable()
+        assert!(
+            output.contains("postgleam.nullable("),
+            "Expected postgleam.nullable() call for nullable params, got:\n{output}"
+        );
+
+        // user_id and title should NOT be Option
+        // Check the params type line specifically
+        assert!(
+            output.contains("user_id: String"),
+            "Expected user_id: String (non-optional), got:\n{output}"
+        );
+        assert!(
+            output.contains("title: String"),
+            "Expected title: String (non-optional), got:\n{output}"
+        );
+        assert!(
+            output.contains("project_id: Option(String)"),
+            "Expected project_id: Option(String), got:\n{output}"
+        );
+        assert!(
+            output.contains("task_id: Option(String)"),
+            "Expected task_id: Option(String), got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_not_null_params_unchanged() {
+        // All columns are NOT NULL — params should remain non-optional
+        let table_columns = vec![
+            make_column("id", "uuid", true),
+            make_column("name", "text", true),
+            make_column("age", "int4", true),
+        ];
+        let table_map = make_table_map("users", table_columns);
+
+        let query = Query {
+            text: "INSERT INTO users (name, age) VALUES ($1, $2) RETURNING *".into(),
+            name: "CreateUser".into(),
+            cmd: ":one".into(),
+            columns: vec![],
+            params: vec![
+                Parameter {
+                    number: 1,
+                    column: Some(make_param_column("name", "text", true, "users")),
+                },
+                Parameter {
+                    number: 2,
+                    column: Some(make_param_column("age", "int4", true, "users")),
+                },
+            ],
+            comments: vec![],
+            filename: "users.sql".into(),
+            insert_into_table: None,
+        };
+
+        let options = Options::default();
+        let driver = PostgresDriver::new(&options);
+
+        let mut w = CodeWriter::new();
+        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let output = w.into_string();
+
+        // No Option types should appear for non-nullable params
+        assert!(
+            !output.contains("Option("),
+            "Expected no Option() types for NOT NULL params, got:\n{output}"
+        );
+        assert!(
+            !output.contains("nullable("),
+            "Expected no nullable() calls for NOT NULL params, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_single_nullable_param_no_params_type() {
+        // Single param targeting a nullable column — no params struct generated,
+        // the param appears directly in the function signature.
+        let table_columns = vec![
+            make_column("id", "int4", true),
+            make_column("bio", "text", false), // nullable
+        ];
+        let table_map = make_table_map("authors", table_columns);
+
+        let query = Query {
+            text: "UPDATE authors SET bio = $1".into(),
+            name: "UpdateBio".into(),
+            cmd: ":exec".into(),
+            columns: vec![],
+            params: vec![Parameter {
+                number: 1,
+                // sqlc says not_null, but column is nullable
+                column: Some(make_param_column("bio", "text", true, "authors")),
+            }],
+            comments: vec![],
+            filename: "authors.sql".into(),
+            insert_into_table: None,
+        };
+
+        let options = Options::default();
+        let driver = PostgresDriver::new(&options);
+
+        let mut w = CodeWriter::new();
+        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let output = w.into_string();
+
+        // Single param should be in the function signature with Option type
+        assert!(
+            output.contains("bio: Option(String)"),
+            "Expected bio: Option(String) in function signature, got:\n{output}"
+        );
+        assert!(
+            output.contains("postgleam.nullable(bio, postgleam.text)"),
+            "Expected postgleam.nullable(bio, postgleam.text), got:\n{output}"
+        );
+    }
 }
