@@ -2,8 +2,35 @@ use crate::codegen::TableMap;
 use crate::driver::query_gen::generate_query_fn;
 use crate::driver::traits::Driver;
 use crate::options::TypeOverride;
-use crate::plugin::plugin::Query;
+use crate::plugin::plugin::{Column, Query};
 use crate::utils::CodeWriter;
+
+/// Check if a column is nullable in its source table definition.
+/// Used to detect when sqlc loses nullability through type casts.
+fn is_nullable_in_source(col: &Column, table_map: &TableMap) -> bool {
+    let table_ref = match &col.table {
+        Some(t) if !t.name.is_empty() => t,
+        _ => return false,
+    };
+    let table = table_map.get(&table_ref.name).or_else(|| {
+        if !table_ref.schema.is_empty() {
+            table_map.get(&format!("{}.{}", table_ref.schema, table_ref.name))
+        } else {
+            None
+        }
+    });
+    if let Some(table) = table {
+        let orig_name = if !col.original_name.is_empty() {
+            &col.original_name
+        } else {
+            &col.name
+        };
+        if let Some(orig_col) = table.columns.iter().find(|c| c.name == *orig_name) {
+            return !orig_col.not_null;
+        }
+    }
+    false
+}
 
 /// Generate a Gleam query module for a group of queries from the same SQL file.
 pub fn generate_queries(queries: &[&Query], _module_name: &str, table_map: &TableMap, overrides: &[TypeOverride], driver: &dyn Driver) -> String {
@@ -20,7 +47,10 @@ pub fn generate_queries(queries: &[&Query], _module_name: &str, table_map: &Tabl
 
     for query in queries {
         for col in &query.columns {
-            if !col.not_null {
+            // Check both sqlc's not_null and the original column's nullability
+            // (sqlc may lose nullability through type casts like `col::text`)
+            let is_nullable = !col.not_null || is_nullable_in_source(col, table_map);
+            if is_nullable {
                 needs_option = true;
             }
         }

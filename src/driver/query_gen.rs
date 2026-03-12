@@ -208,7 +208,10 @@ fn resolve_columns(columns: &[Column], table_map: &TableMap, query_name: &str, o
             let resolved = if let Some(overridden) = find_override(overrides, query_name, &col.name, driver) {
                 overridden
             } else {
-                driver.resolve_column_type(col)
+                // Restore nullability from the source table column when sqlc loses it
+                // through type casts (e.g., `nullable_col::text` loses nullability info).
+                let effective_col = restore_nullability(col, table_map);
+                driver.resolve_column_type(&effective_col)
             };
             result.push(ColumnInfo {
                 field_name,
@@ -218,6 +221,50 @@ fn resolve_columns(columns: &[Column], table_map: &TableMap, query_name: &str, o
     }
 
     result
+}
+
+/// If a column has a source table reference, look up the original column definition
+/// in the catalog to restore its nullability. This fixes the common case where
+/// `nullable_col::text` causes sqlc to mark the result as NOT NULL.
+fn restore_nullability(col: &Column, table_map: &TableMap) -> Column {
+    // If already nullable, nothing to restore
+    if !col.not_null {
+        return col.clone();
+    }
+
+    // Need a table reference to look up the original column
+    let table_ref = match &col.table {
+        Some(t) if !t.name.is_empty() => t,
+        _ => return col.clone(),
+    };
+
+    // Look up the table, trying both plain name and schema-qualified
+    let table = table_map.get(&table_ref.name).or_else(|| {
+        if !table_ref.schema.is_empty() {
+            table_map.get(&format!("{}.{}", table_ref.schema, table_ref.name))
+        } else {
+            None
+        }
+    });
+
+    if let Some(table) = table {
+        // Find the original column by name
+        let orig_name = if !col.original_name.is_empty() {
+            &col.original_name
+        } else {
+            &col.name
+        };
+        if let Some(orig_col) = table.columns.iter().find(|c| c.name == *orig_name) {
+            if !orig_col.not_null {
+                // Original column IS nullable — restore that on the result
+                let mut fixed = col.clone();
+                fixed.not_null = false;
+                return fixed;
+            }
+        }
+    }
+
+    col.clone()
 }
 
 /// Find and apply a type override for a specific query+column combination.
