@@ -543,7 +543,7 @@ pub fn insert_postgres_network_types(conn, params: InsertPostgresNetworkTypesPar
 const get_postgres_network_types_sql = "SELECT\n    c_cidr,\n    c_inet,\n    c_macaddr,\n    c_macaddr8::TEXT AS c_macaddr8\nFROM postgres_network_types\nLIMIT 1"
 
 pub type GetPostgresNetworkTypesRow {
-  GetPostgresNetworkTypesRow(c_cidr: Option(#(Int, BitArray, Int)), c_inet: Option(#(Int, BitArray, Int)), c_macaddr: Option(BitArray), c_macaddr8: String)
+  GetPostgresNetworkTypesRow(c_cidr: Option(#(Int, BitArray, Int)), c_inet: Option(#(Int, BitArray, Int)), c_macaddr: Option(BitArray), c_macaddr8: Option(String))
 }
 
 pub fn get_postgres_network_types(conn) {
@@ -551,7 +551,7 @@ pub fn get_postgres_network_types(conn) {
     use c_cidr <- decode.element(0, decode.optional(decode.inet))
     use c_inet <- decode.element(1, decode.optional(decode.inet))
     use c_macaddr <- decode.element(2, decode.optional(decode.macaddr))
-    use c_macaddr8 <- decode.element(3, decode.text)
+    use c_macaddr8 <- decode.element(3, decode.optional(decode.text))
     decode.success(GetPostgresNetworkTypesRow(c_cidr:, c_inet:, c_macaddr:, c_macaddr8:))
   }
   postgleam.query_one(conn, get_postgres_network_types_sql, [], decoder)
@@ -672,14 +672,14 @@ pub fn insert_postgres_special_types_batch(conn, rows: List(InsertPostgresSpecia
 const get_postgres_special_types_cnt_sql = "WITH grouped_json_types AS (\n    SELECT\n        c_uuid,\n        c_json::text AS c_json,\n        c_jsonb::text AS c_jsonb,\n        COUNT(*) AS cnt\n    FROM postgres_special_types\n    GROUP BY\n        c_uuid,\n        c_json::text,\n        c_jsonb::text\n)\n\nSELECT \n    c_uuid, \n    c_json::json AS c_json, \n    c_jsonb::jsonb AS c_jsonb, \n    cnt\nFROM grouped_json_types\nLIMIT 1"
 
 pub type GetPostgresSpecialTypesCntRow {
-  GetPostgresSpecialTypesCntRow(c_uuid: Option(BitArray), c_json: String, c_jsonb: String, cnt: Int)
+  GetPostgresSpecialTypesCntRow(c_uuid: Option(BitArray), c_json: Option(String), c_jsonb: Option(String), cnt: Int)
 }
 
 pub fn get_postgres_special_types_cnt(conn) {
   let decoder = {
     use c_uuid <- decode.element(0, decode.optional(decode.uuid))
-    use c_json <- decode.element(1, decode.json)
-    use c_jsonb <- decode.element(2, decode.jsonb)
+    use c_json <- decode.element(1, decode.optional(decode.json))
+    use c_jsonb <- decode.element(2, decode.optional(decode.jsonb))
     use cnt <- decode.element(3, decode.int)
     decode.success(GetPostgresSpecialTypesCntRow(c_uuid:, c_json:, c_jsonb:, cnt:))
   }
