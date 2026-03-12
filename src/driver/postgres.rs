@@ -231,9 +231,12 @@ fn pg_type_to_gleam(pg_type: &str, module: &str, uuid_as_string: bool) -> GleamT
         "bytea" => GleamType::simple("BitArray", &format!("{module}.bytea"), "decode.bytea"),
 
         // UUID
+        // Always use {module}.uuid for param encoding — the wire protocol needs
+        // binary UUID format. uuid_as_string only affects the Gleam type (String
+        // vs BitArray) and the decoder (text vs uuid).
         "uuid" => {
             if uuid_as_string {
-                GleamType::simple("String", &format!("{module}.text"), "decode.text")
+                GleamType::simple("String", &format!("{module}.uuid"), "decode.text")
             } else {
                 GleamType::simple("BitArray", &format!("{module}.uuid"), "decode.uuid")
             }
@@ -591,7 +594,7 @@ mod tests {
     fn test_uuid_as_string() {
         let t = pg_type_to_gleam("uuid", "postgleam", true);
         assert_eq!(t.type_name, "String");
-        assert_eq!(t.param_fn, "postgleam.text");
+        assert_eq!(t.param_fn, "postgleam.uuid"); // always uuid for wire protocol
         assert_eq!(t.decoder_fn, "decode.text");
 
         // Default (false) should still be BitArray
