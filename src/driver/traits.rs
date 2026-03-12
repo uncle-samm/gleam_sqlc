@@ -9,8 +9,15 @@ use crate::utils::CodeWriter;
 /// - Generate the correct function calls for each query annotation
 /// - Produce the right imports for the target Gleam database library
 pub trait Driver {
-    /// Module name for imports and function calls (e.g., "postgleam", "glite").
+    /// Module alias for code references (last segment of import path).
+    /// E.g., "postgleam", "glite", or "pg" (for "db/pg").
     fn module_name(&self) -> &str;
+
+    /// Full import path for the main module. E.g., "postgleam" or "db/pg".
+    fn import_path(&self) -> &str;
+
+    /// Full import path for the decode module. E.g., "postgleam/decode" or "db/pg/decode".
+    fn decode_import_path(&self) -> &str;
 
     /// Resolve a database column to its Gleam type, param expression, and decoder expression.
     fn resolve_column_type(&self, col: &Column) -> ResolvedType;
@@ -41,9 +48,10 @@ pub trait Driver {
         if needs_tag_parse || needs_slice {
             w.line("import gleam/string");
         }
-        let module = self.module_name();
-        w.writef(format_args!("import {module}"));
-        w.writef(format_args!("import {module}/decode"));
+        let import = self.import_path();
+        let decode_import = self.decode_import_path();
+        w.writef(format_args!("import {import}"));
+        w.writef(format_args!("import {decode_import}"));
     }
 
     /// Map a Gleam type name from an override to a ResolvedType.
@@ -119,4 +127,10 @@ pub trait Driver {
 
     /// Write the function call for a :execrows query.
     fn write_execrows_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter);
+}
+
+/// Extract the last path segment from a module path for use as the Gleam alias.
+/// E.g., "postgleam" → "postgleam", "db/pg" → "pg", "my/lib/decode" → "decode".
+pub fn path_alias(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }

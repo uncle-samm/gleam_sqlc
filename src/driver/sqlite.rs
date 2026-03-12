@@ -1,13 +1,48 @@
-use crate::driver::traits::Driver;
+use crate::driver::traits::{path_alias, Driver};
 use crate::driver::type_map::{DecoderExpr, GleamType, ParamExpr, ResolvedType};
+use crate::options::Options;
 use crate::plugin::plugin::Column;
 use crate::utils::CodeWriter;
 
-pub struct SqliteDriver;
+pub struct SqliteDriver {
+    /// Full import path, e.g., "glite" or "my/sqlite"
+    import: String,
+    /// Module alias (last segment), e.g., "glite" or "sqlite"
+    alias: String,
+    /// Full decode import path
+    decode_import: String,
+}
+
+impl SqliteDriver {
+    pub fn new(options: &Options) -> Self {
+        let import = options
+            .module
+            .clone()
+            .unwrap_or_else(|| "glite".to_string());
+        let alias = path_alias(&import);
+        let decode_import = options
+            .decode_module
+            .clone()
+            .unwrap_or_else(|| format!("{import}/decode"));
+        Self {
+            import,
+            alias,
+            decode_import,
+        }
+    }
+}
 
 impl Driver for SqliteDriver {
     fn module_name(&self) -> &str {
-        "glite"
+        &self.alias
+    }
+
+    fn import_path(&self) -> &str {
+        &self.import
+    }
+
+    fn decode_import_path(&self) -> &str {
+        &self.decode_import
     }
 
     fn resolve_column_type(&self, col: &Column) -> ResolvedType {
@@ -16,7 +51,7 @@ impl Driver for SqliteDriver {
             .as_ref()
             .map(|t| t.name.as_str())
             .unwrap_or("text");
-        let base = sqlite_type_to_gleam(col_type);
+        let base = sqlite_type_to_gleam(col_type, &self.alias);
         let is_nullable = !col.not_null;
 
         // SQLite doesn't have native array types
@@ -48,16 +83,18 @@ impl Driver for SqliteDriver {
     }
 
     fn write_exec_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
+        let m = self.module_name();
         // glite.exec returns Result(Int, Error) — the Int is discarded for :exec
         w.writef(format_args!(
-            "glite.exec(conn, {const_name}, {params_str})"
+            "{m}.exec(conn, {const_name}, {params_str})"
         ));
     }
 
     fn write_execrows_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
+        let m = self.module_name();
         // glite.exec returns Result(Int, Error) — the Int IS the affected row count
         w.writef(format_args!(
-            "glite.exec(conn, {const_name}, {params_str})"
+            "{m}.exec(conn, {const_name}, {params_str})"
         ));
     }
 }
@@ -67,7 +104,7 @@ impl Driver for SqliteDriver {
 /// SQLite uses type affinity rules. The declared type is mapped to one of
 /// five storage classes: INTEGER, REAL, TEXT, BLOB, or NUMERIC.
 /// See: https://www.sqlite.org/datatype3.html
-fn sqlite_type_to_gleam(sqlite_type: &str) -> GleamType {
+fn sqlite_type_to_gleam(sqlite_type: &str, module: &str) -> GleamType {
     let type_name = sqlite_type.to_uppercase();
     let type_name = type_name.trim();
 
@@ -76,32 +113,32 @@ fn sqlite_type_to_gleam(sqlite_type: &str) -> GleamType {
         // Integer affinity
         "INT" | "INTEGER" | "TINYINT" | "SMALLINT" | "MEDIUMINT" | "BIGINT"
         | "UNSIGNED BIG INT" | "INT2" | "INT8" => {
-            GleamType::simple("Int", "glite.int", "decode.int")
+            GleamType::simple("Int", &format!("{module}.int"), "decode.int")
         }
 
         // Boolean (stored as INTEGER 0/1 in SQLite)
-        "BOOLEAN" | "BOOL" => GleamType::simple("Bool", "glite.bool", "decode.bool"),
+        "BOOLEAN" | "BOOL" => GleamType::simple("Bool", &format!("{module}.bool"), "decode.bool"),
 
         // Real affinity
         "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT" => {
-            GleamType::simple("Float", "glite.float", "decode.float")
+            GleamType::simple("Float", &format!("{module}.float"), "decode.float")
         }
 
         // Text affinity
         "TEXT" | "CHARACTER" | "VARCHAR" | "VARYING CHARACTER" | "NCHAR"
         | "NATIVE CHARACTER" | "NVARCHAR" | "CLOB" => {
-            GleamType::simple("String", "glite.text", "decode.text")
+            GleamType::simple("String", &format!("{module}.text"), "decode.text")
         }
 
         // Blob affinity
-        "BLOB" => GleamType::simple("BitArray", "glite.blob", "decode.blob"),
+        "BLOB" => GleamType::simple("BitArray", &format!("{module}.blob"), "decode.blob"),
 
         // Numeric affinity (decimal/numeric → String since Gleam has no Decimal)
-        "NUMERIC" | "DECIMAL" => GleamType::simple("String", "glite.text", "decode.text"),
+        "NUMERIC" | "DECIMAL" => GleamType::simple("String", &format!("{module}.text"), "decode.text"),
 
         // Date/time types (stored as TEXT in SQLite, or INTEGER for unix epoch)
         "DATE" | "DATETIME" | "TIMESTAMP" => {
-            GleamType::simple("String", "glite.text", "decode.text")
+            GleamType::simple("String", &format!("{module}.text"), "decode.text")
         }
 
         // Apply SQLite type affinity rules for unrecognized types:
@@ -112,24 +149,24 @@ fn sqlite_type_to_gleam(sqlite_type: &str) -> GleamType {
         // 5. Otherwise → NUMERIC affinity (treat as TEXT)
         _ => {
             if type_name.contains("INT") {
-                GleamType::simple("Int", "glite.int", "decode.int")
+                GleamType::simple("Int", &format!("{module}.int"), "decode.int")
             } else if type_name.contains("CHAR")
                 || type_name.contains("CLOB")
                 || type_name.contains("TEXT")
             {
-                GleamType::simple("String", "glite.text", "decode.text")
+                GleamType::simple("String", &format!("{module}.text"), "decode.text")
             } else if type_name.contains("BLOB") || type_name.is_empty() {
-                GleamType::simple("BitArray", "glite.blob", "decode.blob")
+                GleamType::simple("BitArray", &format!("{module}.blob"), "decode.blob")
             } else if type_name.contains("REAL")
                 || type_name.contains("FLOA")
                 || type_name.contains("DOUB")
             {
-                GleamType::simple("Float", "glite.float", "decode.float")
+                GleamType::simple("Float", &format!("{module}.float"), "decode.float")
             } else {
                 eprintln!(
                     "warning: unknown SQLite type '{sqlite_type}', falling back to String"
                 );
-                GleamType::simple("String", "glite.text", "decode.text")
+                GleamType::simple("String", &format!("{module}.text"), "decode.text")
             }
         }
     }
@@ -143,7 +180,7 @@ mod tests {
     fn test_integer_types() {
         for t in &["INTEGER", "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT", "INT2", "INT8"]
         {
-            let g = sqlite_type_to_gleam(t);
+            let g = sqlite_type_to_gleam(t, "glite");
             assert_eq!(g.type_name, "Int", "failed for type {t}");
             assert_eq!(g.param_fn, "glite.int");
             assert_eq!(g.decoder_fn, "decode.int");
@@ -152,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_boolean() {
-        let g = sqlite_type_to_gleam("BOOLEAN");
+        let g = sqlite_type_to_gleam("BOOLEAN", "glite");
         assert_eq!(g.type_name, "Bool");
         assert_eq!(g.param_fn, "glite.bool");
         assert_eq!(g.decoder_fn, "decode.bool");
@@ -161,7 +198,7 @@ mod tests {
     #[test]
     fn test_real_types() {
         for t in &["REAL", "DOUBLE", "DOUBLE PRECISION", "FLOAT"] {
-            let g = sqlite_type_to_gleam(t);
+            let g = sqlite_type_to_gleam(t, "glite");
             assert_eq!(g.type_name, "Float", "failed for type {t}");
             assert_eq!(g.param_fn, "glite.float");
         }
@@ -170,7 +207,7 @@ mod tests {
     #[test]
     fn test_text_types() {
         for t in &["TEXT", "CHARACTER", "VARCHAR", "NCHAR", "NVARCHAR", "CLOB"] {
-            let g = sqlite_type_to_gleam(t);
+            let g = sqlite_type_to_gleam(t, "glite");
             assert_eq!(g.type_name, "String", "failed for type {t}");
             assert_eq!(g.param_fn, "glite.text");
         }
@@ -178,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_blob() {
-        let g = sqlite_type_to_gleam("BLOB");
+        let g = sqlite_type_to_gleam("BLOB", "glite");
         assert_eq!(g.type_name, "BitArray");
         assert_eq!(g.param_fn, "glite.blob");
         assert_eq!(g.decoder_fn, "decode.blob");
@@ -187,7 +224,7 @@ mod tests {
     #[test]
     fn test_datetime_as_text() {
         for t in &["DATE", "DATETIME", "TIMESTAMP"] {
-            let g = sqlite_type_to_gleam(t);
+            let g = sqlite_type_to_gleam(t, "glite");
             assert_eq!(g.type_name, "String", "failed for type {t}");
         }
     }
@@ -195,24 +232,34 @@ mod tests {
     #[test]
     fn test_affinity_rules() {
         // Contains INT → integer affinity
-        let g = sqlite_type_to_gleam("UNSIGNED BIG INT");
+        let g = sqlite_type_to_gleam("UNSIGNED BIG INT", "glite");
         assert_eq!(g.type_name, "Int");
 
         // Contains CHAR → text affinity
-        let g = sqlite_type_to_gleam("VARYING CHARACTER(255)");
+        let g = sqlite_type_to_gleam("VARYING CHARACTER(255)", "glite");
         assert_eq!(g.type_name, "String");
 
         // Contains REAL → real affinity
-        let g = sqlite_type_to_gleam("SOME REAL TYPE");
+        let g = sqlite_type_to_gleam("SOME REAL TYPE", "glite");
         assert_eq!(g.type_name, "Float");
     }
 
     #[test]
     fn test_case_insensitive() {
-        let g = sqlite_type_to_gleam("integer");
+        let g = sqlite_type_to_gleam("integer", "glite");
         assert_eq!(g.type_name, "Int");
 
-        let g = sqlite_type_to_gleam("Text");
+        let g = sqlite_type_to_gleam("Text", "glite");
         assert_eq!(g.type_name, "String");
+    }
+
+    #[test]
+    fn test_custom_module() {
+        let g = sqlite_type_to_gleam("INTEGER", "db");
+        assert_eq!(g.param_fn, "db.int");
+        assert_eq!(g.decoder_fn, "decode.int");
+
+        let g = sqlite_type_to_gleam("TEXT", "db");
+        assert_eq!(g.param_fn, "db.text");
     }
 }

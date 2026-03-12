@@ -8,6 +8,19 @@ pub struct Options {
 
     #[serde(default)]
     pub overrides: Vec<TypeOverride>,
+
+    /// Custom module for generated imports and function calls.
+    /// Replaces the driver default ("postgleam" for PostgreSQL, "glite" for SQLite).
+    /// Example: "db/pg" generates `import db/pg` and calls like `pg.query_one(...)`.
+    #[serde(default)]
+    pub module: Option<String>,
+
+    /// Custom decode module for generated decoder imports.
+    /// Defaults to "{module}/decode". The last path segment is used as the alias
+    /// in generated code, so it should end with "/decode" for compatibility.
+    /// Example: "db/pg/decode" generates `import db/pg/decode`.
+    #[serde(default)]
+    pub decode_module: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -152,12 +152,29 @@ codegen:
   - plugin: gleam
     out: "src/generated"
     options:
+      module: "db/pg"           # Custom module (default: "postgleam" / "glite")
+      decodeModule: "db/pg/decode"  # Custom decode module (default: "{module}/decode")
       overrides:
         - column: "GetAuthor:bio"
           gleamType:
             type: "String"
             notNull: true
 ```
+
+### `module`
+
+Replace the default database library module in generated imports and function calls.
+When set to `"db/pg"`, the generated code uses `import db/pg` and calls like `pg.query_one(...)` instead of `postgleam.query_one(...)`. The last path segment is used as the module alias in code.
+
+This is useful when you have a wrapper module around postgleam/glite that adds
+connection pooling, retry logic, or custom error handling.
+
+### `decodeModule`
+
+Replace the default decode module import. Defaults to `"{module}/decode"`.
+The last path segment must be `decode` for compatibility with generated decoder code.
+
+### `overrides`
 
 Override matching supports `QueryName:ColumnName` or `*:ColumnName` patterns.
 

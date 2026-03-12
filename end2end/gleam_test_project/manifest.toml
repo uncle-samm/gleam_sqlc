@@ -9,10 +9,10 @@ packages = [
   { name = "gleam_stdlib", version = "0.70.0", build_tools = ["gleam"], requirements = [], otp_app = "gleam_stdlib", source = "hex", outer_checksum = "86949BF5D1F0E4AC0AB5B06F235D8A5CC11A2DFC33BF22F752156ED61CA7D0FF" },
   { name = "gleeunit", version = "1.9.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleeunit", source = "hex", outer_checksum = "DA9553CE58B67924B3C631F96FE3370C49EB6D6DC6B384EC4862CC4AAA718F3C" },
   { name = "mug", version = "3.1.0", build_tools = ["gleam"], requirements = ["gleam_erlang", "gleam_stdlib"], otp_app = "mug", source = "hex", outer_checksum = "C01279D98E40371DA23461774B63F0E3581B8F1396049D881B0C7EB32799D93F" },
-  { name = "postgleam", version = "0.5.1", build_tools = ["gleam"], requirements = ["gleam_crypto", "gleam_erlang", "gleam_json", "gleam_otp", "gleam_stdlib", "mug"], otp_app = "postgleam", source = "hex", outer_checksum = "6B973854F64C9FF6FC9759FF840EC074FE3906AFDEA41B87DE51AA42102C03D8" },
+  { name = "postgleam", version = "0.6.0", build_tools = ["gleam"], requirements = ["gleam_crypto", "gleam_erlang", "gleam_json", "gleam_otp", "gleam_stdlib", "mug"], otp_app = "postgleam", source = "hex", outer_checksum = "ED205A89A91C61A67DE6E5CBDE127BE7C5747FD36C3C122E2066902EA96D9973" },
 ]
 
 [requirements]
 gleam_stdlib = { version = ">= 0.44.0 and < 2.0.0" }
 gleeunit = { version = ">= 1.0.0 and < 2.0.0" }
-postgleam = { version = ">= 0.5.1" }
+postgleam = { version = ">= 0.6.0" }

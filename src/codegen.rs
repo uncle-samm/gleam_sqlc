@@ -24,11 +24,11 @@ pub fn generate(request: GenerateRequest) -> GenerateResponse {
         .unwrap_or("postgresql");
 
     let driver: Box<dyn Driver> = match engine {
-        "sqlite" => Box::new(SqliteDriver),
-        "postgresql" | "" => Box::new(PostgresDriver),
+        "sqlite" => Box::new(SqliteDriver::new(&options)),
+        "postgresql" | "" => Box::new(PostgresDriver::new(&options)),
         _ => {
             eprintln!("warning: unsupported engine '{engine}', defaulting to postgresql");
-            Box::new(PostgresDriver)
+            Box::new(PostgresDriver::new(&options))
         }
     };
 
