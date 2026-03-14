@@ -13,6 +13,8 @@ pub struct PostgresDriver {
     decode_import: String,
     /// Map uuid → String (text param/decoder) instead of BitArray
     uuid_as_string: bool,
+    /// Query timeout in ms (postgleam pool requires a timeout arg)
+    query_timeout: i64,
 }
 
 impl PostgresDriver {
@@ -31,6 +33,7 @@ impl PostgresDriver {
             alias,
             decode_import,
             uuid_as_string: options.uuid_as_string,
+            query_timeout: options.query_timeout,
         }
     }
 }
@@ -167,17 +170,70 @@ impl Driver for PostgresDriver {
         true
     }
 
+    fn write_imports(&self, needs_option: bool, needs_execrows: bool, needs_array: bool, needs_copyfrom: bool, needs_slice: bool, w: &mut CodeWriter) {
+        let needs_tag_parse = needs_execrows && self.execrows_needs_tag_parse();
+        if needs_tag_parse {
+            w.line("import gleam/int");
+        }
+        if needs_tag_parse || needs_array || needs_copyfrom || needs_slice {
+            w.line("import gleam/list");
+        }
+        // Always need option for param wrapping (Some/None)
+        w.line("import gleam/option.{type Option, None, Some}");
+        if needs_tag_parse || needs_copyfrom {
+            w.line("import gleam/result");
+        }
+        if needs_tag_parse || needs_slice {
+            w.line("import gleam/string");
+        }
+        let import = self.import_path();
+        let decode_import = self.decode_import_path();
+        w.writef(format_args!("import {import}"));
+        w.writef(format_args!("import {decode_import}"));
+        // postgleam needs the value module for param constructors
+        w.line("import postgleam/value");
+    }
+
+    fn write_one_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
+        let m = self.module_name();
+        let timeout = self.query_timeout;
+        // postgleam has no query_one — use query_with and extract first row
+        w.writef(format_args!(
+            "case {m}.query_with(conn, {const_name}, {params_str}, decoder, {timeout}) {{"
+        ));
+        w.indent();
+        w.line("Ok(resp) -> case resp.rows {");
+        w.indent();
+        w.line("  [first, ..] -> Ok(first)");
+        w.line("  [] -> Error(\"No rows returned\")");
+        w.dedent();
+        w.line("}");
+        w.line("Error(_) -> Error(\"Database error\")");
+        w.dedent();
+        w.line("}");
+    }
+
+    fn write_many_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
+        let m = self.module_name();
+        let timeout = self.query_timeout;
+        w.writef(format_args!(
+            "{m}.query_with(conn, {const_name}, {params_str}, decoder, {timeout})"
+        ));
+    }
+
     fn write_exec_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
         let m = self.module_name();
+        let timeout = self.query_timeout;
         w.writef(format_args!(
-            "{m}.query(conn, {const_name}, {params_str})"
+            "{m}.query(conn, {const_name}, {params_str}, {timeout})"
         ));
     }
 
     fn write_execrows_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
         let m = self.module_name();
+        let timeout = self.query_timeout;
         w.writef(format_args!(
-            "{m}.query(conn, {const_name}, {params_str})"
+            "{m}.query(conn, {const_name}, {params_str}, {timeout})"
         ));
         w.line("|> result.map(fn(r) { parse_affected_rows(r.tag) })");
     }
@@ -186,139 +242,141 @@ impl Driver for PostgresDriver {
 /// Map a PostgreSQL type name to Gleam type info.
 /// The `module` parameter is the module alias used in param constructors
 /// (e.g., "postgleam" or "pg").
-fn pg_type_to_gleam(pg_type: &str, module: &str, uuid_as_string: bool) -> GleamType {
+fn pg_type_to_gleam(pg_type: &str, _module: &str, uuid_as_string: bool) -> GleamType {
     // Strip pg_catalog. prefix if present
     let type_name = pg_type
         .strip_prefix("pg_catalog.")
         .unwrap_or(pg_type)
         .to_lowercase();
 
+    // postgleam uses value constructors (value.Text, value.Integer, etc.)
+    // wrapped in Some() for pool queries that take List(Option(Value)).
+    // The param_fn generates e.g. "Some(value.Text(val))" via the ParamExpr rendering.
+
     match type_name.as_str() {
         // Boolean
-        "bool" | "boolean" => GleamType::simple("Bool", &format!("{module}.bool"), "decode.bool"),
+        "bool" | "boolean" => GleamType::simple("Bool", "value.Boolean", "decode.bool"),
 
         // Integers
         "int2" | "smallint" | "smallserial" => {
-            GleamType::simple("Int", &format!("{module}.int"), "decode.int")
+            GleamType::simple("Int", "value.Integer", "decode.int")
         }
         "int4" | "integer" | "int" | "serial" => {
-            GleamType::simple("Int", &format!("{module}.int"), "decode.int")
+            GleamType::simple("Int", "value.Integer", "decode.int")
         }
         "int8" | "bigint" | "bigserial" => {
-            GleamType::simple("Int", &format!("{module}.int"), "decode.int")
+            GleamType::simple("Int", "value.Integer", "decode.int")
         }
 
         // Floating point
-        "float4" | "real" => GleamType::simple("Float", &format!("{module}.float"), "decode.float"),
+        "float4" | "real" => GleamType::simple("Float", "value.Float", "decode.float"),
         "float8" | "double precision" | "double" => {
-            GleamType::simple("Float", &format!("{module}.float"), "decode.float")
+            GleamType::simple("Float", "value.Float", "decode.float")
         }
 
         // Numeric/Decimal
         "numeric" | "decimal" => {
-            GleamType::simple("String", &format!("{module}.numeric"), "decode.numeric")
+            GleamType::simple("String", "value.Numeric", "decode.numeric")
         }
 
         // Money (Int in PostGleam — cents as int64)
-        "money" => GleamType::simple("Int", &format!("{module}.money"), "decode.money"),
+        "money" => GleamType::simple("Int", "value.Money", "decode.money"),
 
         // Text/String
         "text" | "varchar" | "character varying" | "char" | "character" | "bpchar" | "name" => {
-            GleamType::simple("String", &format!("{module}.text"), "decode.text")
+            GleamType::simple("String", "value.Text", "decode.text")
         }
 
         // Binary
-        "bytea" => GleamType::simple("BitArray", &format!("{module}.bytea"), "decode.bytea"),
+        "bytea" => GleamType::simple("BitArray", "value.Bytea", "decode.bytea"),
 
         // UUID
-        // Always use {module}.uuid for param encoding — the wire protocol needs
-        // binary UUID format. uuid_as_string only affects the Gleam type (String
-        // vs BitArray) and the decoder (text vs uuid).
         "uuid" => {
             if uuid_as_string {
-                GleamType::simple("String", &format!("{module}.uuid"), "decode.text")
+                // When treating UUID as String, use Text param (postgres will auto-cast)
+                GleamType::simple("String", "value.Text", "decode.text")
             } else {
-                GleamType::simple("BitArray", &format!("{module}.uuid"), "decode.uuid")
+                GleamType::simple("BitArray", "value.Uuid", "decode.uuid")
             }
         }
 
         // JSON
-        "json" => GleamType::simple("String", &format!("{module}.json"), "decode.json"),
-        "jsonb" => GleamType::simple("String", &format!("{module}.jsonb"), "decode.jsonb"),
+        "json" => GleamType::simple("String", &format!("value.Json"), "decode.json"),
+        "jsonb" => GleamType::simple("String", &format!("value.Jsonb"), "decode.jsonb"),
 
         // Date/Time — simple (arity 1)
-        "date" => GleamType::simple("Int", &format!("{module}.date"), "decode.date"),
+        "date" => GleamType::simple("Int", &format!("value.Date"), "decode.date"),
         "timestamp" | "timestamp without time zone" => {
-            GleamType::simple("Int", &format!("{module}.timestamp"), "decode.timestamp")
+            GleamType::simple("Int", &format!("value.Timestamp"), "decode.timestamp")
         }
         "timestamptz" | "timestamp with time zone" => {
-            GleamType::simple("Int", &format!("{module}.timestamptz"), "decode.timestamptz")
+            GleamType::simple("Int", &format!("value.Timestamptz"), "decode.timestamptz")
         }
         "time" | "time without time zone" => {
-            GleamType::simple("Int", &format!("{module}.time"), "decode.time")
+            GleamType::simple("Int", &format!("value.Time"), "decode.time")
         }
 
         // Date/Time — multi-arg
         "timetz" | "time with time zone" => {
-            GleamType::multi("#(Int, Int)", &format!("{module}.timetz"), "decode.timetz", 2)
+            GleamType::multi("#(Int, Int)", &format!("value.TimeTz"), "decode.timetz", 2)
         }
         "interval" => {
-            GleamType::multi("#(Int, Int, Int)", &format!("{module}.interval"), "decode.interval", 3)
+            GleamType::multi("#(Int, Int, Int)", &format!("value.Interval"), "decode.interval", 3)
         }
 
         // XML
-        "xml" => GleamType::simple("String", &format!("{module}.xml"), "decode.xml"),
+        "xml" => GleamType::simple("String", &format!("value.Xml"), "decode.xml"),
 
         // JSONPATH
-        "jsonpath" => GleamType::simple("String", &format!("{module}.jsonpath"), "decode.jsonpath"),
+        "jsonpath" => GleamType::simple("String", &format!("value.Jsonpath"), "decode.jsonpath"),
 
         // Geometric types — with param constructors
-        "point" => GleamType::multi("#(Float, Float)", &format!("{module}.point"), "decode.point", 2),
+        "point" => GleamType::multi("#(Float, Float)", &format!("value.Point"), "decode.point", 2),
         "circle" => {
-            GleamType::multi("#(Float, Float, Float)", &format!("{module}.circle"), "decode.circle", 3)
+            GleamType::multi("#(Float, Float, Float)", &format!("value.Circle"), "decode.circle", 3)
         }
 
         // Geometric types
         "line" => {
-            GleamType::multi("#(Float, Float, Float)", &format!("{module}.line"), "decode.line", 3)
+            GleamType::multi("#(Float, Float, Float)", &format!("value.Line"), "decode.line", 3)
         }
         "lseg" => {
-            GleamType::multi("#(Float, Float, Float, Float)", &format!("{module}.lseg"), "decode.lseg", 4)
+            GleamType::multi("#(Float, Float, Float, Float)", &format!("value.Lseg"), "decode.lseg", 4)
         }
         "box" => {
-            GleamType::multi("#(Float, Float, Float, Float)", &format!("{module}.box"), "decode.box", 4)
+            GleamType::multi("#(Float, Float, Float, Float)", &format!("value.Box"), "decode.box", 4)
         }
         "path" => {
-            GleamType::multi("#(Bool, List(#(Float, Float)))", &format!("{module}.path"), "decode.path", 2)
+            GleamType::multi("#(Bool, List(#(Float, Float)))", &format!("value.Path"), "decode.path", 2)
         }
         "polygon" => {
-            GleamType::simple("List(#(Float, Float))", &format!("{module}.polygon"), "decode.polygon")
+            GleamType::simple("List(#(Float, Float))", &format!("value.Polygon"), "decode.polygon")
         }
 
         // Network types
-        "macaddr" => GleamType::simple("BitArray", &format!("{module}.macaddr"), "decode.macaddr"),
-        "macaddr8" => GleamType::simple("BitArray", &format!("{module}.macaddr8"), "decode.macaddr8"),
+        "macaddr" => GleamType::simple("BitArray", &format!("value.Macaddr"), "decode.macaddr"),
+        "macaddr8" => GleamType::simple("BitArray", &format!("value.Macaddr8"), "decode.macaddr8"),
         "cidr" | "inet" => {
-            GleamType::multi("#(Int, BitArray, Int)", &format!("{module}.inet"), "decode.inet", 3)
+            GleamType::multi("#(Int, BitArray, Int)", &format!("value.Inet"), "decode.inet", 3)
         }
 
         // Bit string
         "bit" | "varbit" | "bit varying" => {
-            GleamType::multi("#(Int, BitArray)", &format!("{module}.bit_string"), "decode.bit_string", 2)
+            GleamType::multi("#(Int, BitArray)", &format!("value.BitString"), "decode.bit_string", 2)
         }
 
         // Full-text search (no binary codec support in PostGleam yet)
         "tsvector" | "tsquery" => {
-            GleamType::simple("String", &format!("{module}.text"), "decode.text")
+            GleamType::simple("String", &format!("value.Text"), "decode.text")
         }
 
         // Void (for functions returning void)
-        "void" => GleamType::simple("Nil", &format!("{module}.null"), "decode.text"),
+        "void" => GleamType::simple("Nil", &format!("value.Null"), "decode.text"),
 
         // Unknown — fall back to String
         _ => {
             eprintln!("warning: unknown PostgreSQL type '{pg_type}', falling back to String");
-            GleamType::simple("String", &format!("{module}.text"), "decode.text")
+            GleamType::simple("String", &format!("value.Text"), "decode.text")
         }
     }
 }

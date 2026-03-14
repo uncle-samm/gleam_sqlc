@@ -32,6 +32,12 @@ pub struct Options {
     /// Useful when your app passes UUIDs as text strings.
     #[serde(default)]
     pub uuid_as_string: bool,
+
+    /// Query timeout in milliseconds for PostgreSQL pool queries.
+    /// Default: 5000 (5 seconds). Set to 0 to omit the timeout parameter.
+    /// postgleam's pool.query_with/pool.query require a timeout argument.
+    #[serde(default = "default_query_timeout")]
+    pub query_timeout: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +58,10 @@ pub struct GleamTypeOverride {
 
 fn default_postgleam_version() -> String {
     "0.6.0".to_string()
+}
+
+fn default_query_timeout() -> i64 {
+    5000
 }
 
 impl Options {

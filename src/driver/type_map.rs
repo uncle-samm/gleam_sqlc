@@ -70,20 +70,23 @@ pub enum DecoderExpr {
 
 impl ParamExpr {
     /// Generate the Gleam expression to encode a parameter value.
+    /// For PostgreSQL (postgleam), params are `List(Option(Value))` so all
+    /// expressions are wrapped in `Some(...)`.
     pub fn to_gleam(&self, var_name: &str, module_name: &str) -> String {
         match self {
-            ParamExpr::Direct { fn_name } => format!("{fn_name}({var_name})"),
+            ParamExpr::Direct { fn_name } => format!("Some({fn_name}({var_name}))"),
             ParamExpr::Nullable { inner_fn } => {
-                format!("{module_name}.nullable({var_name}, {inner_fn})")
+                // Option(a) → Some(inner(val)) when Some, None when None
+                format!("case {var_name} {{ option.Some(v) -> Some({inner_fn}(v))  option.None -> None }}")
             }
             ParamExpr::Destruct2 { fn_name } => {
-                format!("case {var_name} {{ #(a, b) -> {fn_name}(a, b) }}")
+                format!("Some(case {var_name} {{ #(a, b) -> {fn_name}(a, b) }})")
             }
             ParamExpr::Destruct3 { fn_name } => {
-                format!("case {var_name} {{ #(a, b, c) -> {fn_name}(a, b, c) }}")
+                format!("Some(case {var_name} {{ #(a, b, c) -> {fn_name}(a, b, c) }})")
             }
             ParamExpr::Destruct4 { fn_name } => {
-                format!("case {var_name} {{ #(a, b, c, d) -> {fn_name}(a, b, c, d) }}")
+                format!("Some(case {var_name} {{ #(a, b, c, d) -> {fn_name}(a, b, c, d) }})")
             }
             ParamExpr::NullableDestruct { fn_name, arity } => {
                 let (pattern, args) = match arity {
@@ -93,19 +96,16 @@ impl ParamExpr {
                     _ => ("#(a, b)", "a, b"),
                 };
                 format!(
-                    "{module_name}.nullable({var_name}, fn(v) {{ case v {{ {pattern} -> {fn_name}({args}) }} }})"
+                    "case {var_name} {{ option.Some(v) -> Some(case v {{ {pattern} -> {fn_name}({args}) }})  option.None -> None }}"
                 )
             }
             ParamExpr::Array { inner_fn, nullable } => {
-                // postgleam.array takes List(Option(Value)).
-                // Param constructors like postgleam.int already return Option(Value),
-                // so we just map each element through the constructor.
                 if *nullable {
                     format!(
-                        "{module_name}.nullable({var_name}, fn(arr) {{ {module_name}.array(list.map(arr, {inner_fn})) }})"
+                        "case {var_name} {{ option.Some(arr) -> Some(value.Array(list.map(arr, fn(v) {{ Some({inner_fn}(v)) }})))  option.None -> None }}"
                     )
                 } else {
-                    format!("{module_name}.array(list.map({var_name}, {inner_fn}))")
+                    format!("Some(value.Array(list.map({var_name}, fn(v) {{ Some({inner_fn}(v)) }})))")
                 }
             }
         }
