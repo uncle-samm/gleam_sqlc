@@ -58,9 +58,7 @@ impl Driver for PostgresDriver {
             .map(|t| t.name.as_str())
             .unwrap_or("text");
         let base = pg_type_to_gleam(col_type, &self.alias, self.uuid_as_string);
-        // sqlc reports pseudotype "any" as nullable, but computed boolean
-        // expressions (IS NOT NULL, EXISTS, etc.) are always NOT NULL.
-        let is_nullable = if col_type == "any" { false } else { !col.not_null };
+        let is_nullable = !col.not_null;
 
         if col.is_array {
             // Array result columns: no decode.array in PostGleam yet, fall back to text.
@@ -256,9 +254,8 @@ fn pg_type_to_gleam(pg_type: &str, _module: &str, uuid_as_string: bool) -> Gleam
     // The param_fn generates e.g. "Some(value.Text(val))" via the ParamExpr rendering.
 
     match type_name.as_str() {
-        // Boolean — includes "any" because sqlc reports computed boolean expressions
-        // (e.g., `col IS NOT NULL`, `EXISTS(...)`) as pseudotype "any".
-        "bool" | "boolean" | "any" => GleamType::simple("Bool", "value.Boolean", "decode.bool"),
+        // Boolean
+        "bool" | "boolean" => GleamType::simple("Bool", "value.Boolean", "decode.bool"),
 
         // Integers
         "int2" | "smallint" | "smallserial" => {
@@ -416,11 +413,11 @@ mod tests {
         assert_eq!(t.type_name, "Int");
         assert_eq!(t.param_fn, "value.Timestamptz");
 
-        // sqlc pseudotype "any" maps to Bool (computed boolean expressions)
+        // sqlc pseudotype "any" falls back to String (unknown expressions)
         let t = pg_type_to_gleam("any", "postgleam", false);
-        assert_eq!(t.type_name, "Bool");
-        assert_eq!(t.param_fn, "value.Boolean");
-        assert_eq!(t.decoder_fn, "decode.bool");
+        assert_eq!(t.type_name, "String");
+        assert_eq!(t.param_fn, "value.Text");
+        assert_eq!(t.decoder_fn, "decode.text");
     }
 
     #[test]
