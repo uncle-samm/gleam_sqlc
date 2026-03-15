@@ -816,10 +816,10 @@ mod tests {
             "Expected Option(String) in params type for nullable columns, got:\n{output}"
         );
 
-        // The param expressions should use nullable()
+        // The param expressions should use nullable wrapping with value constructors
         assert!(
-            output.contains("postgleam.nullable("),
-            "Expected postgleam.nullable() call for nullable params, got:\n{output}"
+            output.contains("option.Some(v) -> Some(value.Text(v))  option.None -> None"),
+            "Expected nullable param wrapping with value.Text, got:\n{output}"
         );
 
         // user_id and title should NOT be Option
@@ -928,8 +928,8 @@ mod tests {
             "Expected bio: Option(String) in function signature, got:\n{output}"
         );
         assert!(
-            output.contains("postgleam.nullable(bio, postgleam.text)"),
-            "Expected postgleam.nullable(bio, postgleam.text), got:\n{output}"
+            output.contains("case bio { option.Some(v) -> Some(value.Text(v))  option.None -> None }"),
+            "Expected nullable param wrapping with value.Text, got:\n{output}"
         );
     }
 
@@ -1029,10 +1029,10 @@ mod tests {
             "Expected task_id: Option(String) recovered from INSERT mapping, got:\n{output}"
         );
 
-        // Should use nullable() for these params
+        // Should use nullable wrapping for these params
         assert!(
-            output.contains("postgleam.nullable("),
-            "Expected postgleam.nullable() for nullable INSERT params, got:\n{output}"
+            output.contains("option.Some(v) -> Some(value.Text(v))  option.None -> None"),
+            "Expected nullable param wrapping with value.Text, got:\n{output}"
         );
 
         // user_id and title should remain non-optional
