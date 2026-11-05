@@ -2,21 +2,14 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import generated/models
 import postgleam
 import postgleam/decode
-
-/// Parse affected row count from a PostgreSQL command tag.
-/// Tags look like "UPDATE 5", "DELETE 2", "INSERT 0 1".
-fn parse_affected_rows(tag: String) -> Int {
-  tag
-    |> string.split(" ")
-    |> list.last()
-    |> result.try(int.parse)
-    |> result.unwrap(0)
-}
+import postgleam/error
+import postgleam/value
 
 const get_author_sql = "SELECT id, name, bio FROM authors\nWHERE name = $1 LIMIT 1"
 
@@ -26,12 +19,12 @@ pub type GetAuthorRow {
 
 pub fn get_author(conn, name: String) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, get_author_sql, [postgleam.text(name)], decoder)
+  postgleam.query_one(conn, get_author_sql, [Some(value.Text(name))], decoder)
 }
 
 const list_authors_sql = "SELECT id, name, bio \nFROM authors\nORDER BY name\nLIMIT $2\nOFFSET $1"
@@ -46,12 +39,12 @@ pub type ListAuthorsParams {
 
 pub fn list_authors(conn, params: ListAuthorsParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(ListAuthorsRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(ListAuthorsRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, list_authors_sql, [postgleam.int(params.offset), postgleam.int(params.limit)], decoder)
+  postgleam.query_with(conn, list_authors_sql, [Some(value.Integer(params.offset)), Some(value.Integer(params.limit))], decoder)
 }
 
 const create_author_sql = "INSERT INTO authors (id, name, bio) VALUES ($1, $2, $3) RETURNING id, name, bio"
@@ -66,12 +59,12 @@ pub type CreateAuthorParams {
 
 pub fn create_author(conn, params: CreateAuthorParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(CreateAuthorRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(CreateAuthorRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, create_author_sql, [postgleam.int(params.id), postgleam.text(params.name), postgleam.nullable(params.bio, postgleam.text)], decoder)
+  postgleam.query_one(conn, create_author_sql, [Some(value.Integer(params.id)), Some(value.Text(params.name)), option.map(params.bio, value.Text)], decoder)
 }
 
 const create_author_return_id_sql = "INSERT INTO authors (name, bio) VALUES ($1, $2) RETURNING id"
@@ -86,10 +79,10 @@ pub type CreateAuthorReturnIdParams {
 
 pub fn create_author_return_id(conn, params: CreateAuthorReturnIdParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    decode.success(CreateAuthorReturnIdRow(id:))
+    use c0 <- decode.element(0, decode.int)
+    decode.success(CreateAuthorReturnIdRow(id: c0))
   }
-  postgleam.query_one(conn, create_author_return_id_sql, [postgleam.text(params.name), postgleam.nullable(params.bio, postgleam.text)], decoder)
+  postgleam.query_one(conn, create_author_return_id_sql, [Some(value.Text(params.name)), option.map(params.bio, value.Text)], decoder)
 }
 
 const get_author_by_id_sql = "SELECT id, name, bio FROM authors\nWHERE id = $1 LIMIT 1"
@@ -100,12 +93,12 @@ pub type GetAuthorByIdRow {
 
 pub fn get_author_by_id(conn, id: Int) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorByIdRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorByIdRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, get_author_by_id_sql, [postgleam.int(id)], decoder)
+  postgleam.query_one(conn, get_author_by_id_sql, [Some(value.Integer(id))], decoder)
 }
 
 const get_author_by_name_pattern_sql = "SELECT id, name, bio FROM authors\nWHERE name LIKE COALESCE($1, '%')"
@@ -116,31 +109,33 @@ pub type GetAuthorByNamePatternRow {
 
 pub fn get_author_by_name_pattern(conn, name: Option(String)) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorByNamePatternRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorByNamePatternRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, get_author_by_name_pattern_sql, [postgleam.nullable(name, postgleam.text)], decoder)
+  postgleam.query_with(conn, get_author_by_name_pattern_sql, [option.map(name, value.Text)], decoder)
 }
 
 const delete_author_sql = "DELETE FROM authors\nWHERE name = $1"
 
 pub fn delete_author(conn, name: String) {
-  postgleam.query(conn, delete_author_sql, [postgleam.text(name)])
+  postgleam.query(conn, delete_author_sql, [Some(value.Text(name))])
+  |> result.replace(Nil)
 }
 
 const truncate_authors_sql = "TRUNCATE TABLE authors CASCADE"
 
 pub fn truncate_authors(conn) {
   postgleam.query(conn, truncate_authors_sql, [])
+  |> result.replace(Nil)
 }
 
 const update_authors_sql = "UPDATE authors\nSET bio = $1\nWHERE bio IS NOT NULL"
 
 pub fn update_authors(conn, bio: Option(String)) {
-  postgleam.query(conn, update_authors_sql, [postgleam.nullable(bio, postgleam.text)])
-  |> result.map(fn(r) { parse_affected_rows(r.tag) })
+  postgleam.query(conn, update_authors_sql, [option.map(bio, value.Text)])
+  |> result.try(fn(r) { affected_rows(r.tag) })
 }
 
 const get_authors_by_ids_sql = "SELECT id, name, bio FROM authors\nWHERE id = ANY($1::BIGINT [])"
@@ -151,12 +146,12 @@ pub type GetAuthorsByIdsRow {
 
 pub fn get_authors_by_ids(conn, param_1: List(Int)) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorsByIdsRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorsByIdsRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, get_authors_by_ids_sql, [postgleam.array(list.map(param_1, postgleam.int))], decoder)
+  postgleam.query_with(conn, get_authors_by_ids_sql, [Some(value.Array(list.map(param_1, fn(e) { Some(value.Integer(e)) })))], decoder)
 }
 
 const get_authors_by_ids_and_names_sql = "SELECT id, name, bio\nFROM authors\nWHERE id = ANY($1::BIGINT []) AND name = ANY($2::TEXT [])"
@@ -171,12 +166,12 @@ pub type GetAuthorsByIdsAndNamesParams {
 
 pub fn get_authors_by_ids_and_names(conn, params: GetAuthorsByIdsAndNamesParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorsByIdsAndNamesRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorsByIdsAndNamesRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, get_authors_by_ids_and_names_sql, [postgleam.array(list.map(params.param_1, postgleam.int)), postgleam.array(list.map(params.param_2, postgleam.text))], decoder)
+  postgleam.query_with(conn, get_authors_by_ids_and_names_sql, [Some(value.Array(list.map(params.param_1, fn(e) { Some(value.Integer(e)) }))), Some(value.Array(list.map(params.param_2, fn(e) { Some(value.Text(e)) })))], decoder)
 }
 
 const create_book_sql = "INSERT INTO books (name, author_id) VALUES ($1, $2) RETURNING id"
@@ -191,10 +186,10 @@ pub type CreateBookParams {
 
 pub fn create_book(conn, params: CreateBookParams) {
   let decoder = {
-    use id <- decode.element(0, decode.uuid)
-    decode.success(CreateBookRow(id:))
+    use c0 <- decode.element(0, decode.uuid)
+    decode.success(CreateBookRow(id: c0))
   }
-  postgleam.query_one(conn, create_book_sql, [postgleam.text(params.name), postgleam.int(params.author_id)], decoder)
+  postgleam.query_one(conn, create_book_sql, [Some(value.Text(params.name)), Some(value.Integer(params.author_id))], decoder)
 }
 
 const list_all_authors_books_sql = "SELECT\n    authors.id, authors.name, authors.bio,\n    books.id, books.name, books.author_id, books.description\nFROM authors\nINNER JOIN books ON authors.id = books.author_id\nORDER BY authors.name"
@@ -205,14 +200,14 @@ pub type ListAllAuthorsBooksRow {
 
 pub fn list_all_authors_books(conn) {
   let decoder = {
-    use authors_id <- decode.element(0, decode.int)
-    use authors_name <- decode.element(1, decode.text)
-    use authors_bio <- decode.element(2, decode.optional(decode.text))
-    use books_id <- decode.element(3, decode.uuid)
-    use books_name <- decode.element(4, decode.text)
-    use books_author_id <- decode.element(5, decode.int)
-    use books_description <- decode.element(6, decode.optional(decode.text))
-    decode.success(ListAllAuthorsBooksRow(authors_id:, authors_name:, authors_bio:, books_id:, books_name:, books_author_id:, books_description:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.uuid)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.int)
+    use c6 <- decode.element(6, decode.optional(decode.text))
+    decode.success(ListAllAuthorsBooksRow(authors_id: c0, authors_name: c1, authors_bio: c2, books_id: c3, books_name: c4, books_author_id: c5, books_description: c6))
   }
   postgleam.query_with(conn, list_all_authors_books_sql, [], decoder)
 }
@@ -225,13 +220,13 @@ pub type GetDuplicateAuthorsRow {
 
 pub fn get_duplicate_authors(conn) {
   let decoder = {
-    use authors_id <- decode.element(0, decode.int)
-    use authors_name <- decode.element(1, decode.text)
-    use authors_bio <- decode.element(2, decode.optional(decode.text))
-    use authors_id_2 <- decode.element(3, decode.int)
-    use authors_name_2 <- decode.element(4, decode.text)
-    use authors_bio_2 <- decode.element(5, decode.optional(decode.text))
-    decode.success(GetDuplicateAuthorsRow(authors_id:, authors_name:, authors_bio:, authors_id_2:, authors_name_2:, authors_bio_2:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.int)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.optional(decode.text))
+    decode.success(GetDuplicateAuthorsRow(authors_id: c0, authors_name: c1, authors_bio: c2, authors_id_2: c3, authors_name_2: c4, authors_bio_2: c5))
   }
   postgleam.query_with(conn, get_duplicate_authors_sql, [], decoder)
 }
@@ -244,48 +239,50 @@ pub type GetAuthorsByBookNameRow {
 
 pub fn get_authors_by_book_name(conn, name: String) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    use books_id <- decode.element(3, decode.uuid)
-    use books_name <- decode.element(4, decode.text)
-    use books_author_id <- decode.element(5, decode.int)
-    use books_description <- decode.element(6, decode.optional(decode.text))
-    decode.success(GetAuthorsByBookNameRow(id:, name:, bio:, books_id:, books_name:, books_author_id:, books_description:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.uuid)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.int)
+    use c6 <- decode.element(6, decode.optional(decode.text))
+    decode.success(GetAuthorsByBookNameRow(id: c0, name: c1, bio: c2, books_id: c3, books_name: c4, books_author_id: c5, books_description: c6))
   }
-  postgleam.query_with(conn, get_authors_by_book_name_sql, [postgleam.text(name)], decoder)
+  postgleam.query_with(conn, get_authors_by_book_name_sql, [Some(value.Text(name))], decoder)
 }
 
 const create_extended_bio_sql = "INSERT INTO extended.bios (author_name, name, bio_type) VALUES ($1, $2, $3)"
 
 pub type CreateExtendedBioParams {
-  CreateExtendedBioParams(author_name: String, name: String, bio_type: Option(String))
+  CreateExtendedBioParams(author_name: String, name: String, bio_type: Option(models.ExtendedBioType))
 }
 
 pub fn create_extended_bio(conn, params: CreateExtendedBioParams) {
-  postgleam.query(conn, create_extended_bio_sql, [postgleam.text(params.author_name), postgleam.text(params.name), postgleam.nullable(params.bio_type, postgleam.text)])
+  postgleam.query(conn, create_extended_bio_sql, [Some(value.Text(params.author_name)), Some(value.Text(params.name)), option.map(params.bio_type, encode_extended_bio_type)])
+  |> result.replace(Nil)
 }
 
 const get_first_extended_bio_by_type_sql = "SELECT author_name, name, bio_type FROM extended.bios WHERE bio_type = $1 LIMIT 1"
 
 pub type GetFirstExtendedBioByTypeRow {
-  GetFirstExtendedBioByTypeRow(author_name: String, name: String, bio_type: Option(String))
+  GetFirstExtendedBioByTypeRow(author_name: String, name: String, bio_type: Option(models.ExtendedBioType))
 }
 
-pub fn get_first_extended_bio_by_type(conn, bio_type: Option(String)) {
+pub fn get_first_extended_bio_by_type(conn, bio_type: Option(models.ExtendedBioType)) {
   let decoder = {
-    use author_name <- decode.element(0, decode.text)
-    use name <- decode.element(1, decode.text)
-    use bio_type <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetFirstExtendedBioByTypeRow(author_name:, name:, bio_type:))
+    use c0 <- decode.element(0, decode.text)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode_extended_bio_type))
+    decode.success(GetFirstExtendedBioByTypeRow(author_name: c0, name: c1, bio_type: c2))
   }
-  postgleam.query_one(conn, get_first_extended_bio_by_type_sql, [postgleam.nullable(bio_type, postgleam.text)], decoder)
+  postgleam.query_one(conn, get_first_extended_bio_by_type_sql, [option.map(bio_type, encode_extended_bio_type)], decoder)
 }
 
 const truncate_extended_bios_sql = "TRUNCATE TABLE extended.bios"
 
 pub fn truncate_extended_bios(conn) {
   postgleam.query(conn, truncate_extended_bios_sql, [])
+  |> result.replace(Nil)
 }
 
 const get_postgres_functions_sql = "SELECT\n    MAX(c_integer) AS max_integer,\n    MAX(c_varchar) AS max_varchar,\n    MAX(c_timestamp) AS max_timestamp\nFROM postgres_datetime_types\nCROSS JOIN postgres_numeric_types\nCROSS JOIN postgres_string_types"
@@ -296,10 +293,10 @@ pub type GetPostgresFunctionsRow {
 
 pub fn get_postgres_functions(conn) {
   let decoder = {
-    use max_integer <- decode.element(0, decode.text)
-    use max_varchar <- decode.element(1, decode.text)
-    use max_timestamp <- decode.element(2, decode.int)
-    decode.success(GetPostgresFunctionsRow(max_integer:, max_varchar:, max_timestamp:))
+    use c0 <- decode.element(0, decode.text)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.int)
+    decode.success(GetPostgresFunctionsRow(max_integer: c0, max_varchar: c1, max_timestamp: c2))
   }
   postgleam.query_one(conn, get_postgres_functions_sql, [], decoder)
 }
@@ -310,8 +307,10 @@ pub type InsertPostgresNumericTypesParams {
   InsertPostgresNumericTypesParams(c_boolean: Option(Bool), c_bit: Option(#(Int, BitArray)), c_smallint: Option(Int), c_integer: Option(Int), c_bigint: Option(Int), c_decimal: Option(String), c_numeric: Option(String), c_real: Option(Float), c_double_precision: Option(Float), c_money: Option(Int))
 }
 
+/// Numeric types
 pub fn insert_postgres_numeric_types(conn, params: InsertPostgresNumericTypesParams) {
-  postgleam.query(conn, insert_postgres_numeric_types_sql, [postgleam.nullable(params.c_boolean, postgleam.bool), postgleam.nullable(params.c_bit, fn(v) { case v { #(a, b) -> postgleam.bit_string(a, b) } }), postgleam.nullable(params.c_smallint, postgleam.int), postgleam.nullable(params.c_integer, postgleam.int), postgleam.nullable(params.c_bigint, postgleam.int), postgleam.nullable(params.c_decimal, postgleam.numeric), postgleam.nullable(params.c_numeric, postgleam.numeric), postgleam.nullable(params.c_real, postgleam.float), postgleam.nullable(params.c_double_precision, postgleam.float), postgleam.nullable(params.c_money, postgleam.money)])
+  postgleam.query(conn, insert_postgres_numeric_types_sql, [option.map(params.c_boolean, value.Boolean), option.map(params.c_bit, fn(t) { case t { #(a, b) -> value.BitString(a, b) } }), option.map(params.c_smallint, value.Integer), option.map(params.c_integer, value.Integer), option.map(params.c_bigint, value.Integer), option.map(params.c_decimal, value.Numeric), option.map(params.c_numeric, value.Numeric), option.map(params.c_real, value.Float), option.map(params.c_double_precision, value.Float), option.map(params.c_money, value.Money)])
+  |> result.replace(Nil)
 }
 
 const get_postgres_numeric_types_sql = "SELECT c_boolean, c_bit, c_smallint, c_integer, c_bigint, c_decimal, c_numeric, c_real, c_double_precision, c_money FROM postgres_numeric_types LIMIT 1"
@@ -322,17 +321,17 @@ pub type GetPostgresNumericTypesRow {
 
 pub fn get_postgres_numeric_types(conn) {
   let decoder = {
-    use c_boolean <- decode.element(0, decode.optional(decode.bool))
-    use c_bit <- decode.element(1, decode.optional(decode.bit_string))
-    use c_smallint <- decode.element(2, decode.optional(decode.int))
-    use c_integer <- decode.element(3, decode.optional(decode.int))
-    use c_bigint <- decode.element(4, decode.optional(decode.int))
-    use c_decimal <- decode.element(5, decode.optional(decode.numeric))
-    use c_numeric <- decode.element(6, decode.optional(decode.numeric))
-    use c_real <- decode.element(7, decode.optional(decode.float))
-    use c_double_precision <- decode.element(8, decode.optional(decode.float))
-    use c_money <- decode.element(9, decode.optional(decode.money))
-    decode.success(GetPostgresNumericTypesRow(c_boolean:, c_bit:, c_smallint:, c_integer:, c_bigint:, c_decimal:, c_numeric:, c_real:, c_double_precision:, c_money:))
+    use c0 <- decode.element(0, decode.optional(decode.bool))
+    use c1 <- decode.element(1, decode.optional(decode.bit_string))
+    use c2 <- decode.element(2, decode.optional(decode.int))
+    use c3 <- decode.element(3, decode.optional(decode.int))
+    use c4 <- decode.element(4, decode.optional(decode.int))
+    use c5 <- decode.element(5, decode.optional(decode.numeric))
+    use c6 <- decode.element(6, decode.optional(decode.numeric))
+    use c7 <- decode.element(7, decode.optional(decode.float))
+    use c8 <- decode.element(8, decode.optional(decode.float))
+    use c9 <- decode.element(9, decode.optional(decode.money))
+    decode.success(GetPostgresNumericTypesRow(c_boolean: c0, c_bit: c1, c_smallint: c2, c_integer: c3, c_bigint: c4, c_decimal: c5, c_numeric: c6, c_real: c7, c_double_precision: c8, c_money: c9))
   }
   postgleam.query_one(conn, get_postgres_numeric_types_sql, [], decoder)
 }
@@ -341,6 +340,7 @@ const truncate_postgres_numeric_types_sql = "TRUNCATE TABLE postgres_numeric_typ
 
 pub fn truncate_postgres_numeric_types(conn) {
   postgleam.query(conn, truncate_postgres_numeric_types_sql, [])
+  |> result.replace(Nil)
 }
 
 const get_postgres_numeric_types_cnt_sql = "SELECT\n    c_boolean,\n    c_bit,\n    c_smallint,\n    c_integer,\n    c_bigint,\n    c_decimal,\n    c_numeric,\n    c_real,\n    c_double_precision,\n    c_money,\n    COUNT(*) AS cnt\nFROM postgres_numeric_types\nGROUP BY\n    c_boolean,\n    c_bit,\n    c_smallint,\n    c_integer,\n    c_bigint,\n    c_decimal,\n    c_numeric,\n    c_real,\n    c_double_precision,\n    c_money\nLIMIT 1"
@@ -351,18 +351,18 @@ pub type GetPostgresNumericTypesCntRow {
 
 pub fn get_postgres_numeric_types_cnt(conn) {
   let decoder = {
-    use c_boolean <- decode.element(0, decode.optional(decode.bool))
-    use c_bit <- decode.element(1, decode.optional(decode.bit_string))
-    use c_smallint <- decode.element(2, decode.optional(decode.int))
-    use c_integer <- decode.element(3, decode.optional(decode.int))
-    use c_bigint <- decode.element(4, decode.optional(decode.int))
-    use c_decimal <- decode.element(5, decode.optional(decode.numeric))
-    use c_numeric <- decode.element(6, decode.optional(decode.numeric))
-    use c_real <- decode.element(7, decode.optional(decode.float))
-    use c_double_precision <- decode.element(8, decode.optional(decode.float))
-    use c_money <- decode.element(9, decode.optional(decode.money))
-    use cnt <- decode.element(10, decode.int)
-    decode.success(GetPostgresNumericTypesCntRow(c_boolean:, c_bit:, c_smallint:, c_integer:, c_bigint:, c_decimal:, c_numeric:, c_real:, c_double_precision:, c_money:, cnt:))
+    use c0 <- decode.element(0, decode.optional(decode.bool))
+    use c1 <- decode.element(1, decode.optional(decode.bit_string))
+    use c2 <- decode.element(2, decode.optional(decode.int))
+    use c3 <- decode.element(3, decode.optional(decode.int))
+    use c4 <- decode.element(4, decode.optional(decode.int))
+    use c5 <- decode.element(5, decode.optional(decode.numeric))
+    use c6 <- decode.element(6, decode.optional(decode.numeric))
+    use c7 <- decode.element(7, decode.optional(decode.float))
+    use c8 <- decode.element(8, decode.optional(decode.float))
+    use c9 <- decode.element(9, decode.optional(decode.money))
+    use c10 <- decode.element(10, decode.int)
+    decode.success(GetPostgresNumericTypesCntRow(c_boolean: c0, c_bit: c1, c_smallint: c2, c_integer: c3, c_bigint: c4, c_decimal: c5, c_numeric: c6, c_real: c7, c_double_precision: c8, c_money: c9, cnt: c10))
   }
   postgleam.query_one(conn, get_postgres_numeric_types_cnt_sql, [], decoder)
 }
@@ -374,10 +374,11 @@ pub type InsertPostgresNumericTypesBatchParams {
 }
 
 pub fn insert_postgres_numeric_types_batch(conn, rows: List(InsertPostgresNumericTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    postgleam.query(conn, insert_postgres_numeric_types_batch_sql, [postgleam.nullable(row.c_boolean, postgleam.bool), postgleam.nullable(row.c_bit, fn(v) { case v { #(a, b) -> postgleam.bit_string(a, b) } }), postgleam.nullable(row.c_smallint, postgleam.int), postgleam.nullable(row.c_integer, postgleam.int), postgleam.nullable(row.c_bigint, postgleam.int), postgleam.nullable(row.c_decimal, postgleam.numeric), postgleam.nullable(row.c_numeric, postgleam.numeric), postgleam.nullable(row.c_real, postgleam.float), postgleam.nullable(row.c_double_precision, postgleam.float), postgleam.nullable(row.c_money, postgleam.money)])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [option.map(row.c_boolean, value.Boolean), option.map(row.c_bit, fn(t) { case t { #(a, b) -> value.BitString(a, b) } }), option.map(row.c_smallint, value.Integer), option.map(row.c_integer, value.Integer), option.map(row.c_bigint, value.Integer), option.map(row.c_decimal, value.Numeric), option.map(row.c_numeric, value.Numeric), option.map(row.c_real, value.Float), option.map(row.c_double_precision, value.Float), option.map(row.c_money, value.Money)]
   })
+  postgleam.query_batch(conn, insert_postgres_numeric_types_batch_sql, param_sets)
+  |> result.map(list.length)
 }
 
 const insert_postgres_string_types_sql = "\nINSERT INTO postgres_string_types\n(\n    c_char,\n    c_varchar,\n    c_character_varying,\n    c_bpchar,\n    c_text\n)\nVALUES ($1, $2, $3, $4, $5)"
@@ -386,8 +387,10 @@ pub type InsertPostgresStringTypesParams {
   InsertPostgresStringTypesParams(c_char: Option(String), c_varchar: Option(String), c_character_varying: Option(String), c_bpchar: Option(String), c_text: Option(String))
 }
 
+/// String types
 pub fn insert_postgres_string_types(conn, params: InsertPostgresStringTypesParams) {
-  postgleam.query(conn, insert_postgres_string_types_sql, [postgleam.nullable(params.c_char, postgleam.text), postgleam.nullable(params.c_varchar, postgleam.text), postgleam.nullable(params.c_character_varying, postgleam.text), postgleam.nullable(params.c_bpchar, postgleam.text), postgleam.nullable(params.c_text, postgleam.text)])
+  postgleam.query(conn, insert_postgres_string_types_sql, [option.map(params.c_char, value.Text), option.map(params.c_varchar, value.Text), option.map(params.c_character_varying, value.Text), option.map(params.c_bpchar, value.Text), option.map(params.c_text, value.Text)])
+  |> result.replace(Nil)
 }
 
 const insert_postgres_string_types_batch_sql = "INSERT INTO postgres_string_types \n(\n    c_char,\n    c_varchar,\n    c_character_varying,\n    c_bpchar,\n    c_text\n) VALUES ($1, $2, $3, $4, $5)"
@@ -397,10 +400,11 @@ pub type InsertPostgresStringTypesBatchParams {
 }
 
 pub fn insert_postgres_string_types_batch(conn, rows: List(InsertPostgresStringTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    postgleam.query(conn, insert_postgres_string_types_batch_sql, [postgleam.nullable(row.c_char, postgleam.text), postgleam.nullable(row.c_varchar, postgleam.text), postgleam.nullable(row.c_character_varying, postgleam.text), postgleam.nullable(row.c_bpchar, postgleam.text), postgleam.nullable(row.c_text, postgleam.text)])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [option.map(row.c_char, value.Text), option.map(row.c_varchar, value.Text), option.map(row.c_character_varying, value.Text), option.map(row.c_bpchar, value.Text), option.map(row.c_text, value.Text)]
   })
+  postgleam.query_batch(conn, insert_postgres_string_types_batch_sql, param_sets)
+  |> result.map(list.length)
 }
 
 const get_postgres_string_types_sql = "SELECT c_char, c_varchar, c_character_varying, c_bpchar, c_text FROM postgres_string_types LIMIT 1"
@@ -411,12 +415,12 @@ pub type GetPostgresStringTypesRow {
 
 pub fn get_postgres_string_types(conn) {
   let decoder = {
-    use c_char <- decode.element(0, decode.optional(decode.text))
-    use c_varchar <- decode.element(1, decode.optional(decode.text))
-    use c_character_varying <- decode.element(2, decode.optional(decode.text))
-    use c_bpchar <- decode.element(3, decode.optional(decode.text))
-    use c_text <- decode.element(4, decode.optional(decode.text))
-    decode.success(GetPostgresStringTypesRow(c_char:, c_varchar:, c_character_varying:, c_bpchar:, c_text:))
+    use c0 <- decode.element(0, decode.optional(decode.text))
+    use c1 <- decode.element(1, decode.optional(decode.text))
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.optional(decode.text))
+    use c4 <- decode.element(4, decode.optional(decode.text))
+    decode.success(GetPostgresStringTypesRow(c_char: c0, c_varchar: c1, c_character_varying: c2, c_bpchar: c3, c_text: c4))
   }
   postgleam.query_one(conn, get_postgres_string_types_sql, [], decoder)
 }
@@ -425,6 +429,7 @@ const truncate_postgres_string_types_sql = "TRUNCATE TABLE postgres_string_types
 
 pub fn truncate_postgres_string_types(conn) {
   postgleam.query(conn, truncate_postgres_string_types_sql, [])
+  |> result.replace(Nil)
 }
 
 const get_postgres_string_types_cnt_sql = "SELECT\n    c_char,\n    c_varchar,\n    c_character_varying,\n    c_bpchar,\n    c_text,\n    COUNT(*) AS cnt\nFROM postgres_string_types\nGROUP BY\n    c_char,\n    c_varchar,\n    c_character_varying,\n    c_bpchar,\n    c_text\nLIMIT 1"
@@ -435,13 +440,13 @@ pub type GetPostgresStringTypesCntRow {
 
 pub fn get_postgres_string_types_cnt(conn) {
   let decoder = {
-    use c_char <- decode.element(0, decode.optional(decode.text))
-    use c_varchar <- decode.element(1, decode.optional(decode.text))
-    use c_character_varying <- decode.element(2, decode.optional(decode.text))
-    use c_bpchar <- decode.element(3, decode.optional(decode.text))
-    use c_text <- decode.element(4, decode.optional(decode.text))
-    use cnt <- decode.element(5, decode.int)
-    decode.success(GetPostgresStringTypesCntRow(c_char:, c_varchar:, c_character_varying:, c_bpchar:, c_text:, cnt:))
+    use c0 <- decode.element(0, decode.optional(decode.text))
+    use c1 <- decode.element(1, decode.optional(decode.text))
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.optional(decode.text))
+    use c4 <- decode.element(4, decode.optional(decode.text))
+    use c5 <- decode.element(5, decode.int)
+    decode.success(GetPostgresStringTypesCntRow(c_char: c0, c_varchar: c1, c_character_varying: c2, c_bpchar: c3, c_text: c4, cnt: c5))
   }
   postgleam.query_one(conn, get_postgres_string_types_cnt_sql, [], decoder)
 }
@@ -454,13 +459,13 @@ pub type GetPostgresStringTypesTextSearchRow {
 
 pub fn get_postgres_string_types_text_search(conn, to_tsquery: String) {
   let decoder = {
-    use c_text <- decode.element(0, decode.optional(decode.text))
-    use query <- decode.element(1, decode.text)
-    use tsv <- decode.element(2, decode.text)
-    use rnk <- decode.element(3, decode.float)
-    decode.success(GetPostgresStringTypesTextSearchRow(c_text:, query:, tsv:, rnk:))
+    use c0 <- decode.element(0, decode.optional(decode.text))
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.text)
+    use c3 <- decode.element(3, decode.float)
+    decode.success(GetPostgresStringTypesTextSearchRow(c_text: c0, query: c1, tsv: c2, rnk: c3))
   }
-  postgleam.query_one(conn, get_postgres_string_types_text_search_sql, [postgleam.text(to_tsquery)], decoder)
+  postgleam.query_one(conn, get_postgres_string_types_text_search_sql, [Some(value.Text(to_tsquery))], decoder)
 }
 
 const insert_postgres_date_time_types_sql = "\nINSERT INTO postgres_datetime_types\n(\n    c_date,\n    c_time,\n    c_timestamp,\n    c_timestamp_with_tz,\n    c_interval,\n    c_timestamp_noda_instant_override\n) VALUES ($1, $2, $3, $4, $5, $6)"
@@ -469,8 +474,10 @@ pub type InsertPostgresDateTimeTypesParams {
   InsertPostgresDateTimeTypesParams(c_date: Option(Int), c_time: Option(Int), c_timestamp: Option(Int), c_timestamp_with_tz: Option(Int), c_interval: Option(#(Int, Int, Int)), c_timestamp_noda_instant_override: Option(Int))
 }
 
+/// DateTime types
 pub fn insert_postgres_date_time_types(conn, params: InsertPostgresDateTimeTypesParams) {
-  postgleam.query(conn, insert_postgres_date_time_types_sql, [postgleam.nullable(params.c_date, postgleam.date), postgleam.nullable(params.c_time, postgleam.time), postgleam.nullable(params.c_timestamp, postgleam.timestamp), postgleam.nullable(params.c_timestamp_with_tz, postgleam.timestamptz), postgleam.nullable(params.c_interval, fn(v) { case v { #(a, b, c) -> postgleam.interval(a, b, c) } }), postgleam.nullable(params.c_timestamp_noda_instant_override, postgleam.timestamp)])
+  postgleam.query(conn, insert_postgres_date_time_types_sql, [option.map(params.c_date, value.Date), option.map(params.c_time, value.Time), option.map(params.c_timestamp, value.Timestamp), option.map(params.c_timestamp_with_tz, value.Timestamptz), option.map(params.c_interval, fn(t) { case t { #(a, b, c) -> value.Interval(a, b, c) } }), option.map(params.c_timestamp_noda_instant_override, value.Timestamp)])
+  |> result.replace(Nil)
 }
 
 const get_postgres_date_time_types_sql = "SELECT c_date, c_time, c_timestamp, c_timestamp_with_tz, c_interval, c_timestamp_noda_instant_override FROM postgres_datetime_types LIMIT 1"
@@ -481,13 +488,13 @@ pub type GetPostgresDateTimeTypesRow {
 
 pub fn get_postgres_date_time_types(conn) {
   let decoder = {
-    use c_date <- decode.element(0, decode.optional(decode.date))
-    use c_time <- decode.element(1, decode.optional(decode.time))
-    use c_timestamp <- decode.element(2, decode.optional(decode.timestamp))
-    use c_timestamp_with_tz <- decode.element(3, decode.optional(decode.timestamptz))
-    use c_interval <- decode.element(4, decode.optional(decode.interval))
-    use c_timestamp_noda_instant_override <- decode.element(5, decode.optional(decode.timestamp))
-    decode.success(GetPostgresDateTimeTypesRow(c_date:, c_time:, c_timestamp:, c_timestamp_with_tz:, c_interval:, c_timestamp_noda_instant_override:))
+    use c0 <- decode.element(0, decode.optional(decode.date))
+    use c1 <- decode.element(1, decode.optional(decode.time))
+    use c2 <- decode.element(2, decode.optional(decode.timestamp))
+    use c3 <- decode.element(3, decode.optional(decode.timestamptz))
+    use c4 <- decode.element(4, decode.optional(decode.interval))
+    use c5 <- decode.element(5, decode.optional(decode.timestamp))
+    decode.success(GetPostgresDateTimeTypesRow(c_date: c0, c_time: c1, c_timestamp: c2, c_timestamp_with_tz: c3, c_interval: c4, c_timestamp_noda_instant_override: c5))
   }
   postgleam.query_one(conn, get_postgres_date_time_types_sql, [], decoder)
 }
@@ -496,6 +503,7 @@ const truncate_postgres_date_time_types_sql = "TRUNCATE TABLE postgres_datetime_
 
 pub fn truncate_postgres_date_time_types(conn) {
   postgleam.query(conn, truncate_postgres_date_time_types_sql, [])
+  |> result.replace(Nil)
 }
 
 const get_postgres_date_time_types_cnt_sql = "SELECT\n    c_date,\n    c_time,\n    c_timestamp,\n    c_timestamp_with_tz,\n    c_interval,\n    COUNT(*) AS cnt\nFROM postgres_datetime_types\nGROUP BY\n    c_date,\n    c_time,\n    c_timestamp,\n    c_timestamp_with_tz,\n    c_interval\nLIMIT 1"
@@ -506,13 +514,13 @@ pub type GetPostgresDateTimeTypesCntRow {
 
 pub fn get_postgres_date_time_types_cnt(conn) {
   let decoder = {
-    use c_date <- decode.element(0, decode.optional(decode.date))
-    use c_time <- decode.element(1, decode.optional(decode.time))
-    use c_timestamp <- decode.element(2, decode.optional(decode.timestamp))
-    use c_timestamp_with_tz <- decode.element(3, decode.optional(decode.timestamptz))
-    use c_interval <- decode.element(4, decode.optional(decode.interval))
-    use cnt <- decode.element(5, decode.int)
-    decode.success(GetPostgresDateTimeTypesCntRow(c_date:, c_time:, c_timestamp:, c_timestamp_with_tz:, c_interval:, cnt:))
+    use c0 <- decode.element(0, decode.optional(decode.date))
+    use c1 <- decode.element(1, decode.optional(decode.time))
+    use c2 <- decode.element(2, decode.optional(decode.timestamp))
+    use c3 <- decode.element(3, decode.optional(decode.timestamptz))
+    use c4 <- decode.element(4, decode.optional(decode.interval))
+    use c5 <- decode.element(5, decode.int)
+    decode.success(GetPostgresDateTimeTypesCntRow(c_date: c0, c_time: c1, c_timestamp: c2, c_timestamp_with_tz: c3, c_interval: c4, cnt: c5))
   }
   postgleam.query_one(conn, get_postgres_date_time_types_cnt_sql, [], decoder)
 }
@@ -524,10 +532,11 @@ pub type InsertPostgresDateTimeTypesBatchParams {
 }
 
 pub fn insert_postgres_date_time_types_batch(conn, rows: List(InsertPostgresDateTimeTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    postgleam.query(conn, insert_postgres_date_time_types_batch_sql, [postgleam.nullable(row.c_date, postgleam.date), postgleam.nullable(row.c_time, postgleam.time), postgleam.nullable(row.c_timestamp, postgleam.timestamp), postgleam.nullable(row.c_timestamp_with_tz, postgleam.timestamptz), postgleam.nullable(row.c_interval, fn(v) { case v { #(a, b, c) -> postgleam.interval(a, b, c) } })])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [option.map(row.c_date, value.Date), option.map(row.c_time, value.Time), option.map(row.c_timestamp, value.Timestamp), option.map(row.c_timestamp_with_tz, value.Timestamptz), option.map(row.c_interval, fn(t) { case t { #(a, b, c) -> value.Interval(a, b, c) } })]
   })
+  postgleam.query_batch(conn, insert_postgres_date_time_types_batch_sql, param_sets)
+  |> result.map(list.length)
 }
 
 const insert_postgres_network_types_sql = "\nINSERT INTO postgres_network_types\n(\n    c_cidr,\n    c_inet,\n    c_macaddr,\n    c_macaddr8\n) VALUES (\n    $1, \n    $2, \n    $3, \n    $4::macaddr8\n)"
@@ -536,8 +545,10 @@ pub type InsertPostgresNetworkTypesParams {
   InsertPostgresNetworkTypesParams(c_cidr: Option(#(Int, BitArray, Int)), c_inet: Option(#(Int, BitArray, Int)), c_macaddr: Option(BitArray), c_macaddr8: Option(BitArray))
 }
 
+/// Network types
 pub fn insert_postgres_network_types(conn, params: InsertPostgresNetworkTypesParams) {
-  postgleam.query(conn, insert_postgres_network_types_sql, [postgleam.nullable(params.c_cidr, fn(v) { case v { #(a, b, c) -> postgleam.inet(a, b, c) } }), postgleam.nullable(params.c_inet, fn(v) { case v { #(a, b, c) -> postgleam.inet(a, b, c) } }), postgleam.nullable(params.c_macaddr, postgleam.macaddr), postgleam.nullable(params.c_macaddr8, postgleam.macaddr8)])
+  postgleam.query(conn, insert_postgres_network_types_sql, [option.map(params.c_cidr, fn(t) { case t { #(a, b, c) -> value.Inet(a, b, c) } }), option.map(params.c_inet, fn(t) { case t { #(a, b, c) -> value.Inet(a, b, c) } }), option.map(params.c_macaddr, value.Macaddr), option.map(params.c_macaddr8, value.Macaddr8)])
+  |> result.replace(Nil)
 }
 
 const get_postgres_network_types_sql = "SELECT\n    c_cidr,\n    c_inet,\n    c_macaddr,\n    c_macaddr8::TEXT AS c_macaddr8\nFROM postgres_network_types\nLIMIT 1"
@@ -548,11 +559,11 @@ pub type GetPostgresNetworkTypesRow {
 
 pub fn get_postgres_network_types(conn) {
   let decoder = {
-    use c_cidr <- decode.element(0, decode.optional(decode.inet))
-    use c_inet <- decode.element(1, decode.optional(decode.inet))
-    use c_macaddr <- decode.element(2, decode.optional(decode.macaddr))
-    use c_macaddr8 <- decode.element(3, decode.optional(decode.text))
-    decode.success(GetPostgresNetworkTypesRow(c_cidr:, c_inet:, c_macaddr:, c_macaddr8:))
+    use c0 <- decode.element(0, decode.optional(decode.inet))
+    use c1 <- decode.element(1, decode.optional(decode.inet))
+    use c2 <- decode.element(2, decode.optional(decode.macaddr))
+    use c3 <- decode.element(3, decode.optional(decode.text))
+    decode.success(GetPostgresNetworkTypesRow(c_cidr: c0, c_inet: c1, c_macaddr: c2, c_macaddr8: c3))
   }
   postgleam.query_one(conn, get_postgres_network_types_sql, [], decoder)
 }
@@ -561,6 +572,7 @@ const truncate_postgres_network_types_sql = "TRUNCATE TABLE postgres_network_typ
 
 pub fn truncate_postgres_network_types(conn) {
   postgleam.query(conn, truncate_postgres_network_types_sql, [])
+  |> result.replace(Nil)
 }
 
 const get_postgres_network_types_cnt_sql = "SELECT\n    c_cidr,\n    c_inet,\n    c_macaddr,\n    COUNT(*) AS cnt\nFROM postgres_network_types\nGROUP BY\n    c_cidr,\n    c_inet,\n    c_macaddr\nLIMIT 1"
@@ -571,11 +583,11 @@ pub type GetPostgresNetworkTypesCntRow {
 
 pub fn get_postgres_network_types_cnt(conn) {
   let decoder = {
-    use c_cidr <- decode.element(0, decode.optional(decode.inet))
-    use c_inet <- decode.element(1, decode.optional(decode.inet))
-    use c_macaddr <- decode.element(2, decode.optional(decode.macaddr))
-    use cnt <- decode.element(3, decode.int)
-    decode.success(GetPostgresNetworkTypesCntRow(c_cidr:, c_inet:, c_macaddr:, cnt:))
+    use c0 <- decode.element(0, decode.optional(decode.inet))
+    use c1 <- decode.element(1, decode.optional(decode.inet))
+    use c2 <- decode.element(2, decode.optional(decode.macaddr))
+    use c3 <- decode.element(3, decode.int)
+    decode.success(GetPostgresNetworkTypesCntRow(c_cidr: c0, c_inet: c1, c_macaddr: c2, cnt: c3))
   }
   postgleam.query_one(conn, get_postgres_network_types_cnt_sql, [], decoder)
 }
@@ -587,38 +599,42 @@ pub type InsertPostgresNetworkTypesBatchParams {
 }
 
 pub fn insert_postgres_network_types_batch(conn, rows: List(InsertPostgresNetworkTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    postgleam.query(conn, insert_postgres_network_types_batch_sql, [postgleam.nullable(row.c_cidr, fn(v) { case v { #(a, b, c) -> postgleam.inet(a, b, c) } }), postgleam.nullable(row.c_inet, fn(v) { case v { #(a, b, c) -> postgleam.inet(a, b, c) } }), postgleam.nullable(row.c_macaddr, postgleam.macaddr)])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [option.map(row.c_cidr, fn(t) { case t { #(a, b, c) -> value.Inet(a, b, c) } }), option.map(row.c_inet, fn(t) { case t { #(a, b, c) -> value.Inet(a, b, c) } }), option.map(row.c_macaddr, value.Macaddr)]
   })
+  postgleam.query_batch(conn, insert_postgres_network_types_batch_sql, param_sets)
+  |> result.map(list.length)
 }
 
 const insert_postgres_special_types_sql = "\nINSERT INTO postgres_special_types\n(\n    c_json,\n    c_json_string_override,\n    c_jsonb,\n    c_jsonpath,\n    c_xml,\n    c_xml_string_override,\n    c_uuid,\n    c_enum\n)\nVALUES (\n    $1, \n    $2::json, \n    $3,\n    $4::jsonpath,\n    $5::xml,\n    $6::xml,\n    $7,\n    $8::c_enum\n)"
 
 pub type InsertPostgresSpecialTypesParams {
-  InsertPostgresSpecialTypesParams(c_json: Option(String), c_json_string_override: Option(String), c_jsonb: Option(String), c_jsonpath: Option(String), c_xml: Option(String), c_xml_string_override: Option(String), c_uuid: Option(BitArray), c_enum: Option(String))
+  InsertPostgresSpecialTypesParams(c_json: Option(String), c_json_string_override: Option(String), c_jsonb: Option(String), c_jsonpath: Option(String), c_xml: Option(String), c_xml_string_override: Option(String), c_uuid: Option(BitArray), c_enum: Option(models.CEnum))
 }
 
+/// Special types
 pub fn insert_postgres_special_types(conn, params: InsertPostgresSpecialTypesParams) {
-  postgleam.query(conn, insert_postgres_special_types_sql, [postgleam.nullable(params.c_json, postgleam.json), postgleam.nullable(params.c_json_string_override, postgleam.json), postgleam.nullable(params.c_jsonb, postgleam.jsonb), postgleam.nullable(params.c_jsonpath, postgleam.jsonpath), postgleam.nullable(params.c_xml, postgleam.xml), postgleam.nullable(params.c_xml_string_override, postgleam.xml), postgleam.nullable(params.c_uuid, postgleam.uuid), postgleam.nullable(params.c_enum, postgleam.text)])
+  postgleam.query(conn, insert_postgres_special_types_sql, [option.map(params.c_json, value.Json), option.map(params.c_json_string_override, value.Json), option.map(params.c_jsonb, value.Jsonb), option.map(params.c_jsonpath, value.Jsonpath), option.map(params.c_xml, value.Xml), option.map(params.c_xml_string_override, value.Xml), option.map(params.c_uuid, value.Uuid), option.map(params.c_enum, encode_c_enum)])
+  |> result.replace(Nil)
 }
 
 const insert_postgres_not_null_types_sql = "INSERT INTO postgres_not_null_types\n(\n    c_enum_not_null\n)\nVALUES (\n    $1::c_enum\n)"
 
-pub fn insert_postgres_not_null_types(conn, c_enum_not_null: String) {
-  postgleam.query(conn, insert_postgres_not_null_types_sql, [postgleam.text(c_enum_not_null)])
+pub fn insert_postgres_not_null_types(conn, c_enum_not_null: models.CEnum) {
+  postgleam.query(conn, insert_postgres_not_null_types_sql, [Some(encode_c_enum(c_enum_not_null))])
+  |> result.replace(Nil)
 }
 
 const get_postgres_not_null_types_sql = "SELECT\n    c_enum_not_null\nFROM postgres_not_null_types \nLIMIT 1"
 
 pub type GetPostgresNotNullTypesRow {
-  GetPostgresNotNullTypesRow(c_enum_not_null: String)
+  GetPostgresNotNullTypesRow(c_enum_not_null: models.CEnum)
 }
 
 pub fn get_postgres_not_null_types(conn) {
   let decoder = {
-    use c_enum_not_null <- decode.element(0, decode.text)
-    decode.success(GetPostgresNotNullTypesRow(c_enum_not_null:))
+    use c0 <- decode.element(0, decode_c_enum)
+    decode.success(GetPostgresNotNullTypesRow(c_enum_not_null: c0))
   }
   postgleam.query_one(conn, get_postgres_not_null_types_sql, [], decoder)
 }
@@ -627,25 +643,26 @@ const truncate_postgres_not_null_types_sql = "TRUNCATE TABLE postgres_not_null_t
 
 pub fn truncate_postgres_not_null_types(conn) {
   postgleam.query(conn, truncate_postgres_not_null_types_sql, [])
+  |> result.replace(Nil)
 }
 
 const get_postgres_special_types_sql = "SELECT\n    c_json,\n    c_json_string_override,\n    c_jsonb,\n    c_jsonpath,\n    c_xml,\n    c_xml_string_override,\n    c_uuid,\n    c_enum\nFROM postgres_special_types \nLIMIT 1"
 
 pub type GetPostgresSpecialTypesRow {
-  GetPostgresSpecialTypesRow(c_json: Option(String), c_json_string_override: Option(String), c_jsonb: Option(String), c_jsonpath: Option(String), c_xml: Option(String), c_xml_string_override: Option(String), c_uuid: Option(BitArray), c_enum: Option(String))
+  GetPostgresSpecialTypesRow(c_json: Option(String), c_json_string_override: Option(String), c_jsonb: Option(String), c_jsonpath: Option(String), c_xml: Option(String), c_xml_string_override: Option(String), c_uuid: Option(BitArray), c_enum: Option(models.CEnum))
 }
 
 pub fn get_postgres_special_types(conn) {
   let decoder = {
-    use c_json <- decode.element(0, decode.optional(decode.json))
-    use c_json_string_override <- decode.element(1, decode.optional(decode.json))
-    use c_jsonb <- decode.element(2, decode.optional(decode.jsonb))
-    use c_jsonpath <- decode.element(3, decode.optional(decode.jsonpath))
-    use c_xml <- decode.element(4, decode.optional(decode.xml))
-    use c_xml_string_override <- decode.element(5, decode.optional(decode.xml))
-    use c_uuid <- decode.element(6, decode.optional(decode.uuid))
-    use c_enum <- decode.element(7, decode.optional(decode.text))
-    decode.success(GetPostgresSpecialTypesRow(c_json:, c_json_string_override:, c_jsonb:, c_jsonpath:, c_xml:, c_xml_string_override:, c_uuid:, c_enum:))
+    use c0 <- decode.element(0, decode.optional(decode.json))
+    use c1 <- decode.element(1, decode.optional(decode.json))
+    use c2 <- decode.element(2, decode.optional(decode.jsonb))
+    use c3 <- decode.element(3, decode.optional(decode.jsonpath))
+    use c4 <- decode.element(4, decode.optional(decode.xml))
+    use c5 <- decode.element(5, decode.optional(decode.xml))
+    use c6 <- decode.element(6, decode.optional(decode.uuid))
+    use c7 <- decode.element(7, decode.optional(decode_c_enum))
+    decode.success(GetPostgresSpecialTypesRow(c_json: c0, c_json_string_override: c1, c_jsonb: c2, c_jsonpath: c3, c_xml: c4, c_xml_string_override: c5, c_uuid: c6, c_enum: c7))
   }
   postgleam.query_one(conn, get_postgres_special_types_sql, [], decoder)
 }
@@ -654,6 +671,7 @@ const truncate_postgres_special_types_sql = "TRUNCATE TABLE postgres_special_typ
 
 pub fn truncate_postgres_special_types(conn) {
   postgleam.query(conn, truncate_postgres_special_types_sql, [])
+  |> result.replace(Nil)
 }
 
 const insert_postgres_special_types_batch_sql = "INSERT INTO postgres_special_types\n(\n    c_uuid,\n    c_json,\n    c_jsonb\n)\nVALUES (\n    $1,\n    $2,\n    $3\n)"
@@ -663,10 +681,11 @@ pub type InsertPostgresSpecialTypesBatchParams {
 }
 
 pub fn insert_postgres_special_types_batch(conn, rows: List(InsertPostgresSpecialTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    postgleam.query(conn, insert_postgres_special_types_batch_sql, [postgleam.nullable(row.c_uuid, postgleam.uuid), postgleam.nullable(row.c_json, postgleam.json), postgleam.nullable(row.c_jsonb, postgleam.jsonb)])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [option.map(row.c_uuid, value.Uuid), option.map(row.c_json, value.Json), option.map(row.c_jsonb, value.Jsonb)]
   })
+  postgleam.query_batch(conn, insert_postgres_special_types_batch_sql, param_sets)
+  |> result.map(list.length)
 }
 
 const get_postgres_special_types_cnt_sql = "WITH grouped_json_types AS (\n    SELECT\n        c_uuid,\n        c_json::text AS c_json,\n        c_jsonb::text AS c_jsonb,\n        COUNT(*) AS cnt\n    FROM postgres_special_types\n    GROUP BY\n        c_uuid,\n        c_json::text,\n        c_jsonb::text\n)\n\nSELECT \n    c_uuid, \n    c_json::json AS c_json, \n    c_jsonb::jsonb AS c_jsonb, \n    cnt\nFROM grouped_json_types\nLIMIT 1"
@@ -677,11 +696,11 @@ pub type GetPostgresSpecialTypesCntRow {
 
 pub fn get_postgres_special_types_cnt(conn) {
   let decoder = {
-    use c_uuid <- decode.element(0, decode.optional(decode.uuid))
-    use c_json <- decode.element(1, decode.optional(decode.json))
-    use c_jsonb <- decode.element(2, decode.optional(decode.jsonb))
-    use cnt <- decode.element(3, decode.int)
-    decode.success(GetPostgresSpecialTypesCntRow(c_uuid:, c_json:, c_jsonb:, cnt:))
+    use c0 <- decode.element(0, decode.optional(decode.uuid))
+    use c1 <- decode.element(1, decode.optional(decode.json))
+    use c2 <- decode.element(2, decode.optional(decode.jsonb))
+    use c3 <- decode.element(3, decode.int)
+    decode.success(GetPostgresSpecialTypesCntRow(c_uuid: c0, c_json: c1, c_jsonb: c2, cnt: c3))
   }
   postgleam.query_one(conn, get_postgres_special_types_cnt_sql, [], decoder)
 }
@@ -692,26 +711,28 @@ pub type InsertPostgresArrayTypesParams {
   InsertPostgresArrayTypesParams(c_bytea: Option(BitArray), c_boolean_array: Option(List(Bool)), c_text_array: Option(List(String)), c_integer_array: Option(List(Int)), c_decimal_array: Option(List(String)), c_date_array: Option(List(Int)), c_timestamp_array: Option(List(Int)))
 }
 
+/// Array types
 pub fn insert_postgres_array_types(conn, params: InsertPostgresArrayTypesParams) {
-  postgleam.query(conn, insert_postgres_array_types_sql, [postgleam.nullable(params.c_bytea, postgleam.bytea), postgleam.nullable(params.c_boolean_array, fn(arr) { postgleam.array(list.map(arr, postgleam.bool)) }), postgleam.nullable(params.c_text_array, fn(arr) { postgleam.array(list.map(arr, postgleam.text)) }), postgleam.nullable(params.c_integer_array, fn(arr) { postgleam.array(list.map(arr, postgleam.int)) }), postgleam.nullable(params.c_decimal_array, fn(arr) { postgleam.array(list.map(arr, postgleam.numeric)) }), postgleam.nullable(params.c_date_array, fn(arr) { postgleam.array(list.map(arr, postgleam.date)) }), postgleam.nullable(params.c_timestamp_array, fn(arr) { postgleam.array(list.map(arr, postgleam.timestamp)) })])
+  postgleam.query(conn, insert_postgres_array_types_sql, [option.map(params.c_bytea, value.Bytea), option.map(params.c_boolean_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Boolean(e)) })) }), option.map(params.c_text_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Text(e)) })) }), option.map(params.c_integer_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Integer(e)) })) }), option.map(params.c_decimal_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Numeric(e)) })) }), option.map(params.c_date_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Date(e)) })) }), option.map(params.c_timestamp_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Timestamp(e)) })) })])
+  |> result.replace(Nil)
 }
 
 const get_postgres_array_types_sql = "SELECT c_bytea, c_boolean_array, c_text_array, c_integer_array, c_decimal_array, c_date_array, c_timestamp_array FROM postgres_array_types LIMIT 1"
 
 pub type GetPostgresArrayTypesRow {
-  GetPostgresArrayTypesRow(c_bytea: Option(BitArray), c_boolean_array: Option(String), c_text_array: Option(String), c_integer_array: Option(String), c_decimal_array: Option(String), c_date_array: Option(String), c_timestamp_array: Option(String))
+  GetPostgresArrayTypesRow(c_bytea: Option(BitArray), c_boolean_array: Option(List(Bool)), c_text_array: Option(List(String)), c_integer_array: Option(List(Int)), c_decimal_array: Option(List(String)), c_date_array: Option(List(Int)), c_timestamp_array: Option(List(Int)))
 }
 
 pub fn get_postgres_array_types(conn) {
   let decoder = {
-    use c_bytea <- decode.element(0, decode.optional(decode.bytea))
-    use c_boolean_array <- decode.element(1, decode.optional(decode.text))
-    use c_text_array <- decode.element(2, decode.optional(decode.text))
-    use c_integer_array <- decode.element(3, decode.optional(decode.text))
-    use c_decimal_array <- decode.element(4, decode.optional(decode.text))
-    use c_date_array <- decode.element(5, decode.optional(decode.text))
-    use c_timestamp_array <- decode.element(6, decode.optional(decode.text))
-    decode.success(GetPostgresArrayTypesRow(c_bytea:, c_boolean_array:, c_text_array:, c_integer_array:, c_decimal_array:, c_date_array:, c_timestamp_array:))
+    use c0 <- decode.element(0, decode.optional(decode.bytea))
+    use c1 <- decode.element(1, decode.optional(decode_array(decode.bool)))
+    use c2 <- decode.element(2, decode.optional(decode_array(decode.text)))
+    use c3 <- decode.element(3, decode.optional(decode_array(decode.int)))
+    use c4 <- decode.element(4, decode.optional(decode_array(decode.numeric)))
+    use c5 <- decode.element(5, decode.optional(decode_array(decode.date)))
+    use c6 <- decode.element(6, decode.optional(decode_array(decode.timestamp)))
+    decode.success(GetPostgresArrayTypesRow(c_bytea: c0, c_boolean_array: c1, c_text_array: c2, c_integer_array: c3, c_decimal_array: c4, c_date_array: c5, c_timestamp_array: c6))
   }
   postgleam.query_one(conn, get_postgres_array_types_sql, [], decoder)
 }
@@ -723,28 +744,29 @@ pub type InsertPostgresArrayTypesBatchParams {
 }
 
 pub fn insert_postgres_array_types_batch(conn, rows: List(InsertPostgresArrayTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    postgleam.query(conn, insert_postgres_array_types_batch_sql, [postgleam.nullable(row.c_bytea, postgleam.bytea), postgleam.nullable(row.c_boolean_array, fn(arr) { postgleam.array(list.map(arr, postgleam.bool)) }), postgleam.nullable(row.c_text_array, fn(arr) { postgleam.array(list.map(arr, postgleam.text)) }), postgleam.nullable(row.c_integer_array, fn(arr) { postgleam.array(list.map(arr, postgleam.int)) }), postgleam.nullable(row.c_decimal_array, fn(arr) { postgleam.array(list.map(arr, postgleam.numeric)) }), postgleam.nullable(row.c_timestamp_array, fn(arr) { postgleam.array(list.map(arr, postgleam.timestamp)) })])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [option.map(row.c_bytea, value.Bytea), option.map(row.c_boolean_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Boolean(e)) })) }), option.map(row.c_text_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Text(e)) })) }), option.map(row.c_integer_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Integer(e)) })) }), option.map(row.c_decimal_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Numeric(e)) })) }), option.map(row.c_timestamp_array, fn(l) { value.Array(list.map(l, fn(e) { Some(value.Timestamp(e)) })) })]
   })
+  postgleam.query_batch(conn, insert_postgres_array_types_batch_sql, param_sets)
+  |> result.map(list.length)
 }
 
 const get_postgres_array_types_cnt_sql = "SELECT\n    c_bytea,\n    c_boolean_array,\n    c_text_array,\n    c_integer_array,\n    c_decimal_array,\n    c_timestamp_array,\n    COUNT(*) AS cnt\nFROM postgres_array_types\nGROUP BY\n    c_bytea,\n    c_boolean_array,\n    c_text_array,\n    c_integer_array,\n    c_decimal_array,\n    c_timestamp_array\nLIMIT 1"
 
 pub type GetPostgresArrayTypesCntRow {
-  GetPostgresArrayTypesCntRow(c_bytea: Option(BitArray), c_boolean_array: Option(String), c_text_array: Option(String), c_integer_array: Option(String), c_decimal_array: Option(String), c_timestamp_array: Option(String), cnt: Int)
+  GetPostgresArrayTypesCntRow(c_bytea: Option(BitArray), c_boolean_array: Option(List(Bool)), c_text_array: Option(List(String)), c_integer_array: Option(List(Int)), c_decimal_array: Option(List(String)), c_timestamp_array: Option(List(Int)), cnt: Int)
 }
 
 pub fn get_postgres_array_types_cnt(conn) {
   let decoder = {
-    use c_bytea <- decode.element(0, decode.optional(decode.bytea))
-    use c_boolean_array <- decode.element(1, decode.optional(decode.text))
-    use c_text_array <- decode.element(2, decode.optional(decode.text))
-    use c_integer_array <- decode.element(3, decode.optional(decode.text))
-    use c_decimal_array <- decode.element(4, decode.optional(decode.text))
-    use c_timestamp_array <- decode.element(5, decode.optional(decode.text))
-    use cnt <- decode.element(6, decode.int)
-    decode.success(GetPostgresArrayTypesCntRow(c_bytea:, c_boolean_array:, c_text_array:, c_integer_array:, c_decimal_array:, c_timestamp_array:, cnt:))
+    use c0 <- decode.element(0, decode.optional(decode.bytea))
+    use c1 <- decode.element(1, decode.optional(decode_array(decode.bool)))
+    use c2 <- decode.element(2, decode.optional(decode_array(decode.text)))
+    use c3 <- decode.element(3, decode.optional(decode_array(decode.int)))
+    use c4 <- decode.element(4, decode.optional(decode_array(decode.numeric)))
+    use c5 <- decode.element(5, decode.optional(decode_array(decode.timestamp)))
+    use c6 <- decode.element(6, decode.int)
+    decode.success(GetPostgresArrayTypesCntRow(c_bytea: c0, c_boolean_array: c1, c_text_array: c2, c_integer_array: c3, c_decimal_array: c4, c_timestamp_array: c5, cnt: c6))
   }
   postgleam.query_one(conn, get_postgres_array_types_cnt_sql, [], decoder)
 }
@@ -753,6 +775,7 @@ const truncate_postgres_array_types_sql = "TRUNCATE TABLE postgres_array_types"
 
 pub fn truncate_postgres_array_types(conn) {
   postgleam.query(conn, truncate_postgres_array_types_sql, [])
+  |> result.replace(Nil)
 }
 
 const insert_postgres_geo_types_sql = "\nINSERT INTO postgres_geometric_types (\n    c_point, \n    c_line, \n    c_lseg, \n    c_box, \n    c_path, \n    c_polygon, \n    c_circle\n)\nVALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -761,8 +784,10 @@ pub type InsertPostgresGeoTypesParams {
   InsertPostgresGeoTypesParams(c_point: Option(#(Float, Float)), c_line: Option(#(Float, Float, Float)), c_lseg: Option(#(Float, Float, Float, Float)), c_box: Option(#(Float, Float, Float, Float)), c_path: Option(#(Bool, List(#(Float, Float)))), c_polygon: Option(List(#(Float, Float))), c_circle: Option(#(Float, Float, Float)))
 }
 
+/// Geometric types
 pub fn insert_postgres_geo_types(conn, params: InsertPostgresGeoTypesParams) {
-  postgleam.query(conn, insert_postgres_geo_types_sql, [postgleam.nullable(params.c_point, fn(v) { case v { #(a, b) -> postgleam.point(a, b) } }), postgleam.nullable(params.c_line, fn(v) { case v { #(a, b, c) -> postgleam.line(a, b, c) } }), postgleam.nullable(params.c_lseg, fn(v) { case v { #(a, b, c, d) -> postgleam.lseg(a, b, c, d) } }), postgleam.nullable(params.c_box, fn(v) { case v { #(a, b, c, d) -> postgleam.box(a, b, c, d) } }), postgleam.nullable(params.c_path, fn(v) { case v { #(a, b) -> postgleam.path(a, b) } }), postgleam.nullable(params.c_polygon, postgleam.polygon), postgleam.nullable(params.c_circle, fn(v) { case v { #(a, b, c) -> postgleam.circle(a, b, c) } })])
+  postgleam.query(conn, insert_postgres_geo_types_sql, [option.map(params.c_point, fn(t) { case t { #(a, b) -> value.Point(a, b) } }), option.map(params.c_line, fn(t) { case t { #(a, b, c) -> value.Line(a, b, c) } }), option.map(params.c_lseg, fn(t) { case t { #(a, b, c, d) -> value.Lseg(a, b, c, d) } }), option.map(params.c_box, fn(t) { case t { #(a, b, c, d) -> value.Box(a, b, c, d) } }), option.map(params.c_path, fn(t) { case t { #(a, b) -> value.Path(a, b) } }), option.map(params.c_polygon, value.Polygon), option.map(params.c_circle, fn(t) { case t { #(a, b, c) -> value.Circle(a, b, c) } })])
+  |> result.replace(Nil)
 }
 
 const insert_postgres_geo_types_batch_sql = "INSERT INTO postgres_geometric_types (\n    c_point, \n    c_line, \n    c_lseg, \n    c_box, \n    c_path, \n    c_polygon, \n    c_circle\n)\nVALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -772,10 +797,11 @@ pub type InsertPostgresGeoTypesBatchParams {
 }
 
 pub fn insert_postgres_geo_types_batch(conn, rows: List(InsertPostgresGeoTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    postgleam.query(conn, insert_postgres_geo_types_batch_sql, [postgleam.nullable(row.c_point, fn(v) { case v { #(a, b) -> postgleam.point(a, b) } }), postgleam.nullable(row.c_line, fn(v) { case v { #(a, b, c) -> postgleam.line(a, b, c) } }), postgleam.nullable(row.c_lseg, fn(v) { case v { #(a, b, c, d) -> postgleam.lseg(a, b, c, d) } }), postgleam.nullable(row.c_box, fn(v) { case v { #(a, b, c, d) -> postgleam.box(a, b, c, d) } }), postgleam.nullable(row.c_path, fn(v) { case v { #(a, b) -> postgleam.path(a, b) } }), postgleam.nullable(row.c_polygon, postgleam.polygon), postgleam.nullable(row.c_circle, fn(v) { case v { #(a, b, c) -> postgleam.circle(a, b, c) } })])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [option.map(row.c_point, fn(t) { case t { #(a, b) -> value.Point(a, b) } }), option.map(row.c_line, fn(t) { case t { #(a, b, c) -> value.Line(a, b, c) } }), option.map(row.c_lseg, fn(t) { case t { #(a, b, c, d) -> value.Lseg(a, b, c, d) } }), option.map(row.c_box, fn(t) { case t { #(a, b, c, d) -> value.Box(a, b, c, d) } }), option.map(row.c_path, fn(t) { case t { #(a, b) -> value.Path(a, b) } }), option.map(row.c_polygon, value.Polygon), option.map(row.c_circle, fn(t) { case t { #(a, b, c) -> value.Circle(a, b, c) } })]
   })
+  postgleam.query_batch(conn, insert_postgres_geo_types_batch_sql, param_sets)
+  |> result.map(list.length)
 }
 
 const get_postgres_geo_types_sql = "SELECT c_point, c_line, c_lseg, c_box, c_path, c_polygon, c_circle FROM postgres_geometric_types LIMIT 1"
@@ -786,14 +812,14 @@ pub type GetPostgresGeoTypesRow {
 
 pub fn get_postgres_geo_types(conn) {
   let decoder = {
-    use c_point <- decode.element(0, decode.optional(decode.point))
-    use c_line <- decode.element(1, decode.optional(decode.line))
-    use c_lseg <- decode.element(2, decode.optional(decode.lseg))
-    use c_box <- decode.element(3, decode.optional(decode.box))
-    use c_path <- decode.element(4, decode.optional(decode.path))
-    use c_polygon <- decode.element(5, decode.optional(decode.polygon))
-    use c_circle <- decode.element(6, decode.optional(decode.circle))
-    decode.success(GetPostgresGeoTypesRow(c_point:, c_line:, c_lseg:, c_box:, c_path:, c_polygon:, c_circle:))
+    use c0 <- decode.element(0, decode.optional(decode.point))
+    use c1 <- decode.element(1, decode.optional(decode.line))
+    use c2 <- decode.element(2, decode.optional(decode.lseg))
+    use c3 <- decode.element(3, decode.optional(decode.box))
+    use c4 <- decode.element(4, decode.optional(decode.path))
+    use c5 <- decode.element(5, decode.optional(decode.polygon))
+    use c6 <- decode.element(6, decode.optional(decode.circle))
+    decode.success(GetPostgresGeoTypesRow(c_point: c0, c_line: c1, c_lseg: c2, c_box: c3, c_path: c4, c_polygon: c5, c_circle: c6))
   }
   postgleam.query_one(conn, get_postgres_geo_types_sql, [], decoder)
 }
@@ -802,4 +828,52 @@ const truncate_postgres_geo_types_sql = "TRUNCATE TABLE postgres_geometric_types
 
 pub fn truncate_postgres_geo_types(conn) {
   postgleam.query(conn, truncate_postgres_geo_types_sql, [])
+  |> result.replace(Nil)
+}
+
+/// Parse the affected row count from a PostgreSQL command tag such as
+/// "UPDATE 5", "DELETE 2" or "INSERT 0 1".
+fn affected_rows(tag: String) -> Result(Int, error.Error) {
+  case list.last(string.split(tag, " ")) {
+    Ok(count) ->
+      int.parse(count)
+      |> result.replace_error(error.DecodeError("unexpected command tag: " <> tag))
+    Error(Nil) -> Error(error.DecodeError("empty command tag"))
+  }
+}
+
+fn decode_array(
+  inner: fn(Option(value.Value)) -> Result(a, error.Error),
+) -> fn(Option(value.Value)) -> Result(List(a), error.Error) {
+  fn(v) {
+    case v {
+      Some(value.Array(items)) -> list.try_map(items, inner)
+      Some(_) -> Error(error.DecodeError("expected an array"))
+      None -> Error(error.DecodeError("unexpected NULL array"))
+    }
+  }
+}
+
+fn encode_c_enum(v: models.CEnum) -> value.Value {
+  value.Text(models.c_enum_to_string(v))
+}
+
+fn decode_c_enum(v: Option(value.Value)) -> Result(models.CEnum, error.Error) {
+  use s <- result.try(decode.text(v))
+  case models.c_enum_from_string(s) {
+    Ok(x) -> Ok(x)
+    Error(Nil) -> Error(error.DecodeError("unexpected c_enum value: " <> s))
+  }
+}
+
+fn encode_extended_bio_type(v: models.ExtendedBioType) -> value.Value {
+  value.Text(models.extended_bio_type_to_string(v))
+}
+
+fn decode_extended_bio_type(v: Option(value.Value)) -> Result(models.ExtendedBioType, error.Error) {
+  use s <- result.try(decode.text(v))
+  case models.extended_bio_type_from_string(s) {
+    Ok(x) -> Ok(x)
+    Error(Nil) -> Error(error.DecodeError("unexpected extended_bio_type value: " <> s))
+  }
 }

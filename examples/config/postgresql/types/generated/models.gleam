@@ -8,16 +8,16 @@ pub type CEnum {
   Big
 }
 
-pub fn c_enum_to_string(val: CEnum) -> String {
-  case val {
+pub fn c_enum_to_string(value: CEnum) -> String {
+  case value {
     Small -> "small"
     Medium -> "medium"
     Big -> "big"
   }
 }
 
-pub fn c_enum_from_string(s: String) -> Result(CEnum, Nil) {
-  case s {
+pub fn c_enum_from_string(value: String) -> Result(CEnum, Nil) {
+  case value {
     "small" -> Ok(Small)
     "medium" -> Ok(Medium)
     "big" -> Ok(Big)
@@ -42,7 +42,7 @@ pub type PostgresNetworkType {
 }
 
 pub type PostgresArrayType {
-  PostgresArrayType(c_bytea: Option(BitArray), c_boolean_array: Option(String), c_text_array: Option(String), c_integer_array: Option(String), c_decimal_array: Option(String), c_date_array: Option(String), c_timestamp_array: Option(String))
+  PostgresArrayType(c_bytea: Option(BitArray), c_boolean_array: Option(List(Bool)), c_text_array: Option(List(String)), c_integer_array: Option(List(Int)), c_decimal_array: Option(List(String)), c_date_array: Option(List(Int)), c_timestamp_array: Option(List(Int)))
 }
 
 pub type PostgresGeometricType {
@@ -50,9 +50,9 @@ pub type PostgresGeometricType {
 }
 
 pub type PostgresSpecialType {
-  PostgresSpecialType(c_uuid: Option(BitArray), c_enum: Option(String), c_json: Option(String), c_json_string_override: Option(String), c_jsonb: Option(String), c_jsonpath: Option(String), c_xml: Option(String), c_xml_string_override: Option(String))
+  PostgresSpecialType(c_uuid: Option(BitArray), c_enum: Option(CEnum), c_json: Option(String), c_json_string_override: Option(String), c_jsonb: Option(String), c_jsonpath: Option(String), c_xml: Option(String), c_xml_string_override: Option(String))
 }
 
 pub type PostgresNotNullType {
-  PostgresNotNullType(c_enum_not_null: String)
+  PostgresNotNullType(c_enum_not_null: CEnum)
 }

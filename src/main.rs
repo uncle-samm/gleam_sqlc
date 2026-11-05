@@ -12,21 +12,27 @@ use plugin::plugin::GenerateRequest;
 
 fn main() {
     let mut input = Vec::new();
-    io::stdin().read_to_end(&mut input).unwrap_or_else(|e| {
-        eprintln!("failed to read stdin: {e}");
-        std::process::exit(1);
-    });
+    if let Err(e) = io::stdin().read_to_end(&mut input) {
+        fail(&format!("failed to read stdin: {e}"));
+    }
 
-    let request = GenerateRequest::decode(input.as_slice()).unwrap_or_else(|e| {
-        eprintln!("failed to decode GenerateRequest: {e}");
-        std::process::exit(1);
-    });
+    let request = match GenerateRequest::decode(input.as_slice()) {
+        Ok(r) => r,
+        Err(e) => fail(&format!("failed to decode GenerateRequest: {e}")),
+    };
 
-    let response = codegen::generate(request);
+    let response = match codegen::generate(request) {
+        Ok(r) => r,
+        Err(e) => fail(&e),
+    };
 
     let output = response.encode_to_vec();
-    io::stdout().write_all(&output).unwrap_or_else(|e| {
-        eprintln!("failed to write stdout: {e}");
-        std::process::exit(1);
-    });
+    if let Err(e) = io::stdout().write_all(&output) {
+        fail(&format!("failed to write stdout: {e}"));
+    }
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("sqlc-gen-gleam: {message}");
+    std::process::exit(1);
 }

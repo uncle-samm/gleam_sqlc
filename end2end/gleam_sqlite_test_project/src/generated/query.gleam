@@ -15,10 +15,10 @@ pub type GetAuthorRow {
 
 pub fn get_author(conn, name: String) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorRow(id: c0, name: c1, bio: c2))
   }
   glite.query_one(conn, get_author_sql, [glite.text(name)], decoder)
 }
@@ -35,12 +35,12 @@ pub type ListAuthorsParams {
 
 pub fn list_authors(conn, params: ListAuthorsParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(ListAuthorsRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(ListAuthorsRow(id: c0, name: c1, bio: c2))
   }
-  glite.query_with(conn, list_authors_sql, [glite.int(params.offset), glite.int(params.limit)], decoder)
+  glite.query(conn, list_authors_sql, [glite.int(params.offset), glite.int(params.limit)], decoder)
 }
 
 const create_author_sql = "INSERT INTO authors (id, name, bio) VALUES (?, ?, ?)"
@@ -51,6 +51,7 @@ pub type CreateAuthorParams {
 
 pub fn create_author(conn, params: CreateAuthorParams) {
   glite.exec(conn, create_author_sql, [glite.int(params.id), glite.text(params.name), glite.nullable(params.bio, glite.text)])
+  |> result.replace(Nil)
 }
 
 const create_author_return_id_sql = "INSERT INTO authors (name, bio) VALUES (?, ?) RETURNING id"
@@ -65,8 +66,8 @@ pub type CreateAuthorReturnIdParams {
 
 pub fn create_author_return_id(conn, params: CreateAuthorReturnIdParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    decode.success(CreateAuthorReturnIdRow(id:))
+    use c0 <- decode.element(0, decode.int)
+    decode.success(CreateAuthorReturnIdRow(id: c0))
   }
   glite.query_one(conn, create_author_return_id_sql, [glite.text(params.name), glite.nullable(params.bio, glite.text)], decoder)
 }
@@ -79,10 +80,10 @@ pub type GetAuthorByIdRow {
 
 pub fn get_author_by_id(conn, id: Int) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorByIdRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorByIdRow(id: c0, name: c1, bio: c2))
   }
   glite.query_one(conn, get_author_by_id_sql, [glite.int(id)], decoder)
 }
@@ -95,12 +96,12 @@ pub type GetAuthorByNamePatternRow {
 
 pub fn get_author_by_name_pattern(conn, name: Option(String)) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorByNamePatternRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorByNamePatternRow(id: c0, name: c1, bio: c2))
   }
-  glite.query_with(conn, get_author_by_name_pattern_sql, [glite.nullable(name, glite.text)], decoder)
+  glite.query(conn, get_author_by_name_pattern_sql, [glite.nullable(name, glite.text)], decoder)
 }
 
 const update_authors_sql = "UPDATE authors\nSET bio = ?\nWHERE bio IS NOT NULL"
@@ -113,6 +114,7 @@ const delete_author_sql = "DELETE FROM authors\nWHERE name = ?"
 
 pub fn delete_author(conn, name: String) {
   glite.exec(conn, delete_author_sql, [glite.text(name)])
+  |> result.replace(Nil)
 }
 
 const create_book_sql = "INSERT INTO books (name, author_id) VALUES (?, ?) RETURNING id"
@@ -127,8 +129,8 @@ pub type CreateBookParams {
 
 pub fn create_book(conn, params: CreateBookParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    decode.success(CreateBookRow(id:))
+    use c0 <- decode.element(0, decode.int)
+    decode.success(CreateBookRow(id: c0))
   }
   glite.query_one(conn, create_book_sql, [glite.text(params.name), glite.int(params.author_id)], decoder)
 }
@@ -141,16 +143,16 @@ pub type ListAllAuthorsBooksRow {
 
 pub fn list_all_authors_books(conn) {
   let decoder = {
-    use authors_id <- decode.element(0, decode.int)
-    use authors_name <- decode.element(1, decode.text)
-    use authors_bio <- decode.element(2, decode.optional(decode.text))
-    use books_id <- decode.element(3, decode.int)
-    use books_name <- decode.element(4, decode.text)
-    use books_author_id <- decode.element(5, decode.int)
-    use books_description <- decode.element(6, decode.optional(decode.text))
-    decode.success(ListAllAuthorsBooksRow(authors_id:, authors_name:, authors_bio:, books_id:, books_name:, books_author_id:, books_description:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.int)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.int)
+    use c6 <- decode.element(6, decode.optional(decode.text))
+    decode.success(ListAllAuthorsBooksRow(authors_id: c0, authors_name: c1, authors_bio: c2, books_id: c3, books_name: c4, books_author_id: c5, books_description: c6))
   }
-  glite.query_with(conn, list_all_authors_books_sql, [], decoder)
+  glite.query(conn, list_all_authors_books_sql, [], decoder)
 }
 
 const get_duplicate_authors_sql = "SELECT\n    authors1.id, authors1.name, authors1.bio,\n    authors2.id, authors2.name, authors2.bio\nFROM authors AS authors1\nINNER JOIN authors AS authors2 ON authors1.name = authors2.name\nWHERE authors1.id < authors2.id"
@@ -161,15 +163,15 @@ pub type GetDuplicateAuthorsRow {
 
 pub fn get_duplicate_authors(conn) {
   let decoder = {
-    use authors_id <- decode.element(0, decode.int)
-    use authors_name <- decode.element(1, decode.text)
-    use authors_bio <- decode.element(2, decode.optional(decode.text))
-    use authors_id_2 <- decode.element(3, decode.int)
-    use authors_name_2 <- decode.element(4, decode.text)
-    use authors_bio_2 <- decode.element(5, decode.optional(decode.text))
-    decode.success(GetDuplicateAuthorsRow(authors_id:, authors_name:, authors_bio:, authors_id_2:, authors_name_2:, authors_bio_2:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.int)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.optional(decode.text))
+    decode.success(GetDuplicateAuthorsRow(authors_id: c0, authors_name: c1, authors_bio: c2, authors_id_2: c3, authors_name_2: c4, authors_bio_2: c5))
   }
-  glite.query_with(conn, get_duplicate_authors_sql, [], decoder)
+  glite.query(conn, get_duplicate_authors_sql, [], decoder)
 }
 
 const get_authors_by_ids_sql = "SELECT id, name, bio FROM authors\nWHERE id IN (/*SLICE:ids*/?)"
@@ -180,14 +182,13 @@ pub type GetAuthorsByIdsRow {
 
 pub fn get_authors_by_ids(conn, id: List(Int)) {
   let sql = string.replace(get_authors_by_ids_sql, "/*SLICE:ids*/?", string.join(list.repeat("?", list.length(id)), ", "))
-  let params = list.flatten([list.map(id, glite.int)])
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorsByIdsRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorsByIdsRow(id: c0, name: c1, bio: c2))
   }
-  glite.query_with(conn, sql, params, decoder)
+  glite.query(conn, sql, list.flatten([list.map(id, glite.int)]), decoder)
 }
 
 const get_authors_by_ids_and_names_sql = "SELECT id, name, bio FROM authors\nWHERE id IN (/*SLICE:ids*/?) AND name IN (/*SLICE:names*/?)"
@@ -201,23 +202,22 @@ pub type GetAuthorsByIdsAndNamesParams {
 }
 
 pub fn get_authors_by_ids_and_names(conn, params: GetAuthorsByIdsAndNamesParams) {
-  let sql = get_authors_by_ids_and_names_sql
-  let sql = string.replace(sql, "/*SLICE:ids*/?", string.join(list.repeat("?", list.length(params.id)), ", "))
+  let sql = string.replace(get_authors_by_ids_and_names_sql, "/*SLICE:ids*/?", string.join(list.repeat("?", list.length(params.id)), ", "))
   let sql = string.replace(sql, "/*SLICE:names*/?", string.join(list.repeat("?", list.length(params.name)), ", "))
-  let params = list.flatten([list.map(params.id, glite.int), list.map(params.name, glite.text)])
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorsByIdsAndNamesRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorsByIdsAndNamesRow(id: c0, name: c1, bio: c2))
   }
-  glite.query_with(conn, sql, params, decoder)
+  glite.query(conn, sql, list.flatten([list.map(params.id, glite.int), list.map(params.name, glite.text)]), decoder)
 }
 
 const delete_all_authors_sql = "DELETE FROM authors"
 
 pub fn delete_all_authors(conn) {
   glite.exec(conn, delete_all_authors_sql, [])
+  |> result.replace(Nil)
 }
 
 const insert_sqlite_types_sql = "INSERT INTO types_sqlite (c_integer, c_real, c_text, c_blob)\nVALUES (?, ?, ?, ?)"
@@ -228,6 +228,7 @@ pub type InsertSqliteTypesParams {
 
 pub fn insert_sqlite_types(conn, params: InsertSqliteTypesParams) {
   glite.exec(conn, insert_sqlite_types_sql, [glite.nullable(params.c_integer, glite.int), glite.nullable(params.c_real, glite.float), glite.nullable(params.c_text, glite.text), glite.nullable(params.c_blob, glite.blob)])
+  |> result.replace(Nil)
 }
 
 const get_sqlite_types_sql = "SELECT c_integer, c_real, c_text, c_blob\nFROM types_sqlite\nLIMIT 1"
@@ -238,11 +239,11 @@ pub type GetSqliteTypesRow {
 
 pub fn get_sqlite_types(conn) {
   let decoder = {
-    use c_integer <- decode.element(0, decode.optional(decode.int))
-    use c_real <- decode.element(1, decode.optional(decode.float))
-    use c_text <- decode.element(2, decode.optional(decode.text))
-    use c_blob <- decode.element(3, decode.optional(decode.blob))
-    decode.success(GetSqliteTypesRow(c_integer:, c_real:, c_text:, c_blob:))
+    use c0 <- decode.element(0, decode.optional(decode.int))
+    use c1 <- decode.element(1, decode.optional(decode.float))
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.optional(decode.blob))
+    decode.success(GetSqliteTypesRow(c_integer: c0, c_real: c1, c_text: c2, c_blob: c3))
   }
   glite.query_one(conn, get_sqlite_types_sql, [], decoder)
 }
@@ -255,12 +256,12 @@ pub type GetSqliteTypesCntRow {
 
 pub fn get_sqlite_types_cnt(conn) {
   let decoder = {
-    use c_integer <- decode.element(0, decode.optional(decode.int))
-    use c_real <- decode.element(1, decode.optional(decode.float))
-    use c_text <- decode.element(2, decode.optional(decode.text))
-    use c_blob <- decode.element(3, decode.optional(decode.blob))
-    use cnt <- decode.element(4, decode.int)
-    decode.success(GetSqliteTypesCntRow(c_integer:, c_real:, c_text:, c_blob:, cnt:))
+    use c0 <- decode.element(0, decode.optional(decode.int))
+    use c1 <- decode.element(1, decode.optional(decode.float))
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.optional(decode.blob))
+    use c4 <- decode.element(4, decode.int)
+    decode.success(GetSqliteTypesCntRow(c_integer: c0, c_real: c1, c_text: c2, c_blob: c3, cnt: c4))
   }
   glite.query_one(conn, get_sqlite_types_cnt_sql, [], decoder)
 }
@@ -272,10 +273,10 @@ pub type InsertSqliteTypesBatchParams {
 }
 
 pub fn insert_sqlite_types_batch(conn, rows: List(InsertSqliteTypesBatchParams)) {
-  list.try_each(rows, fn(row) {
-    glite.exec(conn, insert_sqlite_types_batch_sql, [glite.nullable(row.c_integer, glite.int), glite.nullable(row.c_real, glite.float), glite.nullable(row.c_text, glite.text), glite.nullable(row.c_blob, glite.blob)])
-    |> result.map(fn(_) { Nil })
+  let param_sets = list.map(rows, fn(row) {
+    [glite.nullable(row.c_integer, glite.int), glite.nullable(row.c_real, glite.float), glite.nullable(row.c_text, glite.text), glite.nullable(row.c_blob, glite.blob)]
   })
+  glite.exec_many(conn, insert_sqlite_types_batch_sql, param_sets)
 }
 
 const get_sqlite_functions_sql = "SELECT\n    MAX(c_integer) AS max_integer,\n    MAX(c_real) AS max_real,\n    MAX(c_text) AS max_text\nFROM types_sqlite"
@@ -286,10 +287,10 @@ pub type GetSqliteFunctionsRow {
 
 pub fn get_sqlite_functions(conn) {
   let decoder = {
-    use max_integer <- decode.element(0, decode.optional(decode.int))
-    use max_real <- decode.element(1, decode.optional(decode.float))
-    use max_text <- decode.element(2, decode.text)
-    decode.success(GetSqliteFunctionsRow(max_integer:, max_real:, max_text:))
+    use c0 <- decode.element(0, decode.optional(decode.int))
+    use c1 <- decode.element(1, decode.optional(decode.float))
+    use c2 <- decode.element(2, decode.text)
+    decode.success(GetSqliteFunctionsRow(max_integer: c0, max_real: c1, max_text: c2))
   }
   glite.query_one(conn, get_sqlite_functions_sql, [], decoder)
 }
@@ -298,4 +299,5 @@ const delete_all_sqlite_types_sql = "DELETE FROM types_sqlite"
 
 pub fn delete_all_sqlite_types(conn) {
   glite.exec(conn, delete_all_sqlite_types_sql, [])
+  |> result.replace(Nil)
 }

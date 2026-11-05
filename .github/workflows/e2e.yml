@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  SQLC_VERSION: "1.30.0"
+  GLEAM_VERSION: "1.19.2"
+  OTP_VERSION: "28"
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
@@ -16,8 +21,9 @@ jobs:
           POSTGRES_DB: sqlc_test
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
+        # Same host port as end2end/docker-compose.yml, so the tests need no edits.
         ports:
-          - 5432:5432
+          - 5433:5432
         options: >-
           --health-cmd "pg_isready -d sqlc_test"
           --health-interval 10s
@@ -40,13 +46,14 @@ jobs:
       - name: Install sqlc
         uses: sqlc-dev/setup-sqlc@v4
         with:
-          sqlc-version: "1.28.0"
+          sqlc-version: ${{ env.SQLC_VERSION }}
 
       - name: Install Gleam
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "27"
-          gleam-version: "1.14.0"
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -57,29 +64,19 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build WASM plugin
-        run: cargo build --release --target wasm32-wasip1
-
-      - name: Update sha256 in E2E sqlc config
-        run: |
-          SHA=$(shasum -a 256 target/wasm32-wasip1/release/sqlc-gen-gleam.wasm | cut -d ' ' -f 1)
-          sed -i "s/sha256: .*/sha256: \"$SHA\"/" end2end/sqlc.yaml
-
       - name: Load database schema
         run: |
           cat examples/config/postgresql/types/schema.sql examples/config/postgresql/authors/schema.sql | \
-          PGPASSWORD=postgres psql -h localhost -U postgres -d sqlc_test -f -
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d sqlc_test -v ON_ERROR_STOP=1 -f -
 
       - name: Generate Gleam code
-        run: cd end2end && sqlc generate
+        id: generate
+        run: make generate
 
-      - name: Build Gleam project
-        run: cd end2end/gleam_test_project && gleam build
+      - name: PostgreSQL E2E tests
+        run: cd end2end/gleam_test_project && gleam test
 
-      - name: Run E2E tests
-        env:
-          # CI uses port 5432 directly; local dev uses 5433 to avoid conflicts
-          POSTGRES_PORT: "5432"
-        run: |
-          sed -i 's/config.port(5433)/config.port(5432)/' end2end/gleam_test_project/test/sqlc_e2e_test_test.gleam
-          cd end2end/gleam_test_project && gleam test
+      # Runs even when the PostgreSQL suite fails, so both results show.
+      - name: SQLite E2E tests
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        run: cd end2end/gleam_sqlite_test_project && gleam test

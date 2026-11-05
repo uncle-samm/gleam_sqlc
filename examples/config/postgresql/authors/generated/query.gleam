@@ -2,21 +2,14 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, Some}
 import gleam/result
 import gleam/string
+import generated/models
 import postgleam
 import postgleam/decode
-
-/// Parse affected row count from a PostgreSQL command tag.
-/// Tags look like "UPDATE 5", "DELETE 2", "INSERT 0 1".
-fn parse_affected_rows(tag: String) -> Int {
-  tag
-    |> string.split(" ")
-    |> list.last()
-    |> result.try(int.parse)
-    |> result.unwrap(0)
-}
+import postgleam/error
+import postgleam/value
 
 const get_author_sql = "SELECT id, name, bio FROM authors\nWHERE name = $1 LIMIT 1"
 
@@ -26,12 +19,12 @@ pub type GetAuthorRow {
 
 pub fn get_author(conn, name: String) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, get_author_sql, [postgleam.text(name)], decoder)
+  postgleam.query_one(conn, get_author_sql, [Some(value.Text(name))], decoder)
 }
 
 const list_authors_sql = "SELECT id, name, bio \nFROM authors\nORDER BY name\nLIMIT $2\nOFFSET $1"
@@ -46,12 +39,12 @@ pub type ListAuthorsParams {
 
 pub fn list_authors(conn, params: ListAuthorsParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(ListAuthorsRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(ListAuthorsRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, list_authors_sql, [postgleam.int(params.offset), postgleam.int(params.limit)], decoder)
+  postgleam.query_with(conn, list_authors_sql, [Some(value.Integer(params.offset)), Some(value.Integer(params.limit))], decoder)
 }
 
 const create_author_sql = "INSERT INTO authors (id, name, bio) VALUES ($1, $2, $3) RETURNING id, name, bio"
@@ -66,12 +59,12 @@ pub type CreateAuthorParams {
 
 pub fn create_author(conn, params: CreateAuthorParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(CreateAuthorRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(CreateAuthorRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, create_author_sql, [postgleam.int(params.id), postgleam.text(params.name), postgleam.nullable(params.bio, postgleam.text)], decoder)
+  postgleam.query_one(conn, create_author_sql, [Some(value.Integer(params.id)), Some(value.Text(params.name)), option.map(params.bio, value.Text)], decoder)
 }
 
 const create_author_return_id_sql = "INSERT INTO authors (name, bio) VALUES ($1, $2) RETURNING id"
@@ -86,10 +79,10 @@ pub type CreateAuthorReturnIdParams {
 
 pub fn create_author_return_id(conn, params: CreateAuthorReturnIdParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    decode.success(CreateAuthorReturnIdRow(id:))
+    use c0 <- decode.element(0, decode.int)
+    decode.success(CreateAuthorReturnIdRow(id: c0))
   }
-  postgleam.query_one(conn, create_author_return_id_sql, [postgleam.text(params.name), postgleam.nullable(params.bio, postgleam.text)], decoder)
+  postgleam.query_one(conn, create_author_return_id_sql, [Some(value.Text(params.name)), option.map(params.bio, value.Text)], decoder)
 }
 
 const get_author_by_id_sql = "SELECT id, name, bio FROM authors\nWHERE id = $1 LIMIT 1"
@@ -100,12 +93,12 @@ pub type GetAuthorByIdRow {
 
 pub fn get_author_by_id(conn, id: Int) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorByIdRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorByIdRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, get_author_by_id_sql, [postgleam.int(id)], decoder)
+  postgleam.query_one(conn, get_author_by_id_sql, [Some(value.Integer(id))], decoder)
 }
 
 const get_author_by_name_pattern_sql = "SELECT id, name, bio FROM authors\nWHERE name LIKE COALESCE($1, '%')"
@@ -116,31 +109,33 @@ pub type GetAuthorByNamePatternRow {
 
 pub fn get_author_by_name_pattern(conn, name: Option(String)) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorByNamePatternRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorByNamePatternRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, get_author_by_name_pattern_sql, [postgleam.nullable(name, postgleam.text)], decoder)
+  postgleam.query_with(conn, get_author_by_name_pattern_sql, [option.map(name, value.Text)], decoder)
 }
 
 const delete_author_sql = "DELETE FROM authors\nWHERE name = $1"
 
 pub fn delete_author(conn, name: String) {
-  postgleam.query(conn, delete_author_sql, [postgleam.text(name)])
+  postgleam.query(conn, delete_author_sql, [Some(value.Text(name))])
+  |> result.replace(Nil)
 }
 
 const truncate_authors_sql = "TRUNCATE TABLE authors CASCADE"
 
 pub fn truncate_authors(conn) {
   postgleam.query(conn, truncate_authors_sql, [])
+  |> result.replace(Nil)
 }
 
 const update_authors_sql = "UPDATE authors\nSET bio = $1\nWHERE bio IS NOT NULL"
 
 pub fn update_authors(conn, bio: Option(String)) {
-  postgleam.query(conn, update_authors_sql, [postgleam.nullable(bio, postgleam.text)])
-  |> result.map(fn(r) { parse_affected_rows(r.tag) })
+  postgleam.query(conn, update_authors_sql, [option.map(bio, value.Text)])
+  |> result.try(fn(r) { affected_rows(r.tag) })
 }
 
 const get_authors_by_ids_sql = "SELECT id, name, bio FROM authors\nWHERE id = ANY($1::BIGINT [])"
@@ -151,12 +146,12 @@ pub type GetAuthorsByIdsRow {
 
 pub fn get_authors_by_ids(conn, param_1: List(Int)) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorsByIdsRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorsByIdsRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, get_authors_by_ids_sql, [postgleam.array(list.map(param_1, postgleam.int))], decoder)
+  postgleam.query_with(conn, get_authors_by_ids_sql, [Some(value.Array(list.map(param_1, fn(e) { Some(value.Integer(e)) })))], decoder)
 }
 
 const get_authors_by_ids_and_names_sql = "SELECT id, name, bio\nFROM authors\nWHERE id = ANY($1::BIGINT []) AND name = ANY($2::TEXT [])"
@@ -171,12 +166,12 @@ pub type GetAuthorsByIdsAndNamesParams {
 
 pub fn get_authors_by_ids_and_names(conn, params: GetAuthorsByIdsAndNamesParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorsByIdsAndNamesRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorsByIdsAndNamesRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, get_authors_by_ids_and_names_sql, [postgleam.array(list.map(params.param_1, postgleam.int)), postgleam.array(list.map(params.param_2, postgleam.text))], decoder)
+  postgleam.query_with(conn, get_authors_by_ids_and_names_sql, [Some(value.Array(list.map(params.param_1, fn(e) { Some(value.Integer(e)) }))), Some(value.Array(list.map(params.param_2, fn(e) { Some(value.Text(e)) })))], decoder)
 }
 
 const create_book_sql = "INSERT INTO books (name, author_id) VALUES ($1, $2) RETURNING id"
@@ -191,10 +186,10 @@ pub type CreateBookParams {
 
 pub fn create_book(conn, params: CreateBookParams) {
   let decoder = {
-    use id <- decode.element(0, decode.uuid)
-    decode.success(CreateBookRow(id:))
+    use c0 <- decode.element(0, decode.uuid)
+    decode.success(CreateBookRow(id: c0))
   }
-  postgleam.query_one(conn, create_book_sql, [postgleam.text(params.name), postgleam.int(params.author_id)], decoder)
+  postgleam.query_one(conn, create_book_sql, [Some(value.Text(params.name)), Some(value.Integer(params.author_id))], decoder)
 }
 
 const list_all_authors_books_sql = "SELECT\n    authors.id, authors.name, authors.bio,\n    books.id, books.name, books.author_id, books.description\nFROM authors\nINNER JOIN books ON authors.id = books.author_id\nORDER BY authors.name"
@@ -205,14 +200,14 @@ pub type ListAllAuthorsBooksRow {
 
 pub fn list_all_authors_books(conn) {
   let decoder = {
-    use authors_id <- decode.element(0, decode.int)
-    use authors_name <- decode.element(1, decode.text)
-    use authors_bio <- decode.element(2, decode.optional(decode.text))
-    use books_id <- decode.element(3, decode.uuid)
-    use books_name <- decode.element(4, decode.text)
-    use books_author_id <- decode.element(5, decode.int)
-    use books_description <- decode.element(6, decode.optional(decode.text))
-    decode.success(ListAllAuthorsBooksRow(authors_id:, authors_name:, authors_bio:, books_id:, books_name:, books_author_id:, books_description:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.uuid)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.int)
+    use c6 <- decode.element(6, decode.optional(decode.text))
+    decode.success(ListAllAuthorsBooksRow(authors_id: c0, authors_name: c1, authors_bio: c2, books_id: c3, books_name: c4, books_author_id: c5, books_description: c6))
   }
   postgleam.query_with(conn, list_all_authors_books_sql, [], decoder)
 }
@@ -225,13 +220,13 @@ pub type GetDuplicateAuthorsRow {
 
 pub fn get_duplicate_authors(conn) {
   let decoder = {
-    use authors_id <- decode.element(0, decode.int)
-    use authors_name <- decode.element(1, decode.text)
-    use authors_bio <- decode.element(2, decode.optional(decode.text))
-    use authors_id_2 <- decode.element(3, decode.int)
-    use authors_name_2 <- decode.element(4, decode.text)
-    use authors_bio_2 <- decode.element(5, decode.optional(decode.text))
-    decode.success(GetDuplicateAuthorsRow(authors_id:, authors_name:, authors_bio:, authors_id_2:, authors_name_2:, authors_bio_2:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.int)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.optional(decode.text))
+    decode.success(GetDuplicateAuthorsRow(authors_id: c0, authors_name: c1, authors_bio: c2, authors_id_2: c3, authors_name_2: c4, authors_bio_2: c5))
   }
   postgleam.query_with(conn, get_duplicate_authors_sql, [], decoder)
 }
@@ -244,46 +239,71 @@ pub type GetAuthorsByBookNameRow {
 
 pub fn get_authors_by_book_name(conn, name: String) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    use books_id <- decode.element(3, decode.uuid)
-    use books_name <- decode.element(4, decode.text)
-    use books_author_id <- decode.element(5, decode.int)
-    use books_description <- decode.element(6, decode.optional(decode.text))
-    decode.success(GetAuthorsByBookNameRow(id:, name:, bio:, books_id:, books_name:, books_author_id:, books_description:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    use c3 <- decode.element(3, decode.uuid)
+    use c4 <- decode.element(4, decode.text)
+    use c5 <- decode.element(5, decode.int)
+    use c6 <- decode.element(6, decode.optional(decode.text))
+    decode.success(GetAuthorsByBookNameRow(id: c0, name: c1, bio: c2, books_id: c3, books_name: c4, books_author_id: c5, books_description: c6))
   }
-  postgleam.query_with(conn, get_authors_by_book_name_sql, [postgleam.text(name)], decoder)
+  postgleam.query_with(conn, get_authors_by_book_name_sql, [Some(value.Text(name))], decoder)
 }
 
 const create_extended_bio_sql = "INSERT INTO extended.bios (author_name, name, bio_type) VALUES ($1, $2, $3)"
 
 pub type CreateExtendedBioParams {
-  CreateExtendedBioParams(author_name: String, name: String, bio_type: Option(String))
+  CreateExtendedBioParams(author_name: String, name: String, bio_type: Option(models.ExtendedBioType))
 }
 
 pub fn create_extended_bio(conn, params: CreateExtendedBioParams) {
-  postgleam.query(conn, create_extended_bio_sql, [postgleam.text(params.author_name), postgleam.text(params.name), postgleam.nullable(params.bio_type, postgleam.text)])
+  postgleam.query(conn, create_extended_bio_sql, [Some(value.Text(params.author_name)), Some(value.Text(params.name)), option.map(params.bio_type, encode_extended_bio_type)])
+  |> result.replace(Nil)
 }
 
 const get_first_extended_bio_by_type_sql = "SELECT author_name, name, bio_type FROM extended.bios WHERE bio_type = $1 LIMIT 1"
 
 pub type GetFirstExtendedBioByTypeRow {
-  GetFirstExtendedBioByTypeRow(author_name: String, name: String, bio_type: Option(String))
+  GetFirstExtendedBioByTypeRow(author_name: String, name: String, bio_type: Option(models.ExtendedBioType))
 }
 
-pub fn get_first_extended_bio_by_type(conn, bio_type: Option(String)) {
+pub fn get_first_extended_bio_by_type(conn, bio_type: Option(models.ExtendedBioType)) {
   let decoder = {
-    use author_name <- decode.element(0, decode.text)
-    use name <- decode.element(1, decode.text)
-    use bio_type <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetFirstExtendedBioByTypeRow(author_name:, name:, bio_type:))
+    use c0 <- decode.element(0, decode.text)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode_extended_bio_type))
+    decode.success(GetFirstExtendedBioByTypeRow(author_name: c0, name: c1, bio_type: c2))
   }
-  postgleam.query_one(conn, get_first_extended_bio_by_type_sql, [postgleam.nullable(bio_type, postgleam.text)], decoder)
+  postgleam.query_one(conn, get_first_extended_bio_by_type_sql, [option.map(bio_type, encode_extended_bio_type)], decoder)
 }
 
 const truncate_extended_bios_sql = "TRUNCATE TABLE extended.bios"
 
 pub fn truncate_extended_bios(conn) {
   postgleam.query(conn, truncate_extended_bios_sql, [])
+  |> result.replace(Nil)
+}
+
+/// Parse the affected row count from a PostgreSQL command tag such as
+/// "UPDATE 5", "DELETE 2" or "INSERT 0 1".
+fn affected_rows(tag: String) -> Result(Int, error.Error) {
+  case list.last(string.split(tag, " ")) {
+    Ok(count) ->
+      int.parse(count)
+      |> result.replace_error(error.DecodeError("unexpected command tag: " <> tag))
+    Error(Nil) -> Error(error.DecodeError("empty command tag"))
+  }
+}
+
+fn encode_extended_bio_type(v: models.ExtendedBioType) -> value.Value {
+  value.Text(models.extended_bio_type_to_string(v))
+}
+
+fn decode_extended_bio_type(v: Option(value.Value)) -> Result(models.ExtendedBioType, error.Error) {
+  use s <- result.try(decode.text(v))
+  case models.extended_bio_type_from_string(s) {
+    Ok(x) -> Ok(x)
+    Error(Nil) -> Error(error.DecodeError("unexpected extended_bio_type value: " <> s))
+  }
 }

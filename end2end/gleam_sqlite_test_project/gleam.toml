@@ -1,10 +1,11 @@
 name = "sqlc_sqlite_e2e_test"
 version = "0.1.0"
 target = "erlang"
+gleam = ">= 1.19.0"
 
 [dependencies]
-gleam_stdlib = ">= 0.44.0 and < 2.0.0"
-glite = ">= 0.1.0"
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+glite = ">= 0.4.0 and < 1.0.0"
 
 [dev-dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

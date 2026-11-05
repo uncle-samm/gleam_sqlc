@@ -1,14 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::codegen::TableMap;
 use crate::driver::traits::Driver;
-use crate::driver::type_map::ResolvedType;
-use crate::generators::naming::{column_to_field_name, escape_reserved, query_to_fn_name, to_pascal_case};
+use crate::driver::type_map::{ResolvedType, TypeContext};
+use crate::generators::naming::{
+    column_to_field_name, doc_comment_lines, escape_gleam_string, query_to_fn_name, to_pascal_case,
+};
 use crate::options::TypeOverride;
 use crate::plugin::plugin::{Column, Identifier, Query};
 use crate::utils::CodeWriter;
 
 struct ParamInfo {
+    /// Field name in the Params type (or the argument name when there is one param).
     name: String,
     resolved: ResolvedType,
     is_slice: bool,
@@ -21,13 +24,55 @@ struct ColumnInfo {
     resolved: ResolvedType,
 }
 
-/// Generate a Gleam function for a single query.
-pub fn generate_query_fn(query: &Query, table_map: &TableMap, overrides: &[TypeOverride], w: &mut CodeWriter, driver: &dyn Driver) {
-    let fn_name = escape_reserved(&query_to_fn_name(&query.name));
-    let cmd = query.cmd.as_str();
+/// Local names used in generated function bodies. A lone parameter with one of
+/// these names is renamed so it cannot be shadowed.
+const LOCAL_NAMES: &[&str] = &[
+    "conn",
+    "decoder",
+    "sql",
+    "params",
+    "param_sets",
+    "rows",
+    "response",
+];
 
-    let params = resolve_params(&query.params, &query.text, table_map, &query.insert_into_table, driver);
-    let columns = resolve_columns(&query.columns, table_map, &query.name, overrides, driver);
+/// sqlc commands this plugin generates code for.
+pub const SUPPORTED_COMMANDS: &[&str] = &[
+    ":one",
+    ":many",
+    ":exec",
+    ":execrows",
+    ":execlastid",
+    ":copyfrom",
+];
+
+/// Generate a Gleam function for a single query.
+pub fn generate_query_fn(
+    query: &Query,
+    table_map: &TableMap,
+    overrides: &[TypeOverride],
+    ctx: &TypeContext,
+    w: &mut CodeWriter,
+    driver: &dyn Driver,
+) -> Result<(), String> {
+    let cmd = query.cmd.as_str();
+    if !SUPPORTED_COMMANDS.contains(&cmd) {
+        return Err(format!(
+            "query '{}' uses '{cmd}', which sqlc-gen-gleam does not support (supported: {})",
+            query.name,
+            SUPPORTED_COMMANDS.join(" ")
+        ));
+    }
+    let fn_name = query_to_fn_name(&query.name);
+    let params = resolve_params(query, table_map, ctx, driver)?;
+    let columns = resolve_columns(
+        &query.columns,
+        table_map,
+        &query.name,
+        overrides,
+        ctx,
+        driver,
+    );
     let has_slices = params.iter().any(|p| p.is_slice);
 
     let const_name = format!("{fn_name}_sql");
@@ -37,148 +82,156 @@ pub fn generate_query_fn(query: &Query, table_map: &TableMap, overrides: &[TypeO
     ));
     w.blank();
 
-    let row_type_name = format!("{}Row", to_pascal_case(&query.name));
-
-    let needs_row_type =
-        !columns.is_empty() && (cmd == ":one" || cmd == ":many" || cmd == ":execlastid");
-    if needs_row_type {
+    let base_type_name = to_pascal_case(&fn_name);
+    let row_type_name = format!("{base_type_name}Row");
+    let returns_rows = !columns.is_empty() && matches!(cmd, ":one" | ":many" | ":execlastid");
+    if returns_rows {
         generate_row_type(&row_type_name, &columns, w);
         w.blank();
     }
 
-    let params_type_name = format!("{}Params", to_pascal_case(&query.name));
-
-    if cmd == ":copyfrom" {
-        // :copyfrom always generates a params type (even for 1 param)
-        if !params.is_empty() {
-            generate_params_type(&params_type_name, &params, w);
-            w.blank();
-        }
-        let sig = format!("{fn_name}(conn, rows: List({params_type_name}))");
-        w.writef(format_args!("pub fn {sig} {{"));
-        w.indent();
-        generate_copyfrom_body(&const_name, &params, w, driver);
-        w.dedent();
-        w.line("}");
-        return;
-    }
-
-    if params.len() >= 2 {
+    let params_type_name = format!("{base_type_name}Params");
+    let use_params_type = cmd == ":copyfrom" || params.len() >= 2;
+    if use_params_type && !params.is_empty() {
         generate_params_type(&params_type_name, &params, w);
         w.blank();
     }
 
-    let sig = build_fn_signature(&fn_name, &params, &params_type_name);
+    for line in query
+        .comments
+        .iter()
+        .flat_map(|c| doc_comment_lines(c.trim()))
+    {
+        w.line(&line);
+    }
+    let sig = if cmd == ":copyfrom" {
+        format!("{fn_name}(conn, rows: List({params_type_name}))")
+    } else {
+        build_fn_signature(&fn_name, &params, &params_type_name)
+    };
     w.writef(format_args!("pub fn {sig} {{"));
     w.indent();
 
-    // For slice queries, emit SQL expansion and flattened params
-    let sql_var = if has_slices {
-        emit_slice_expansion(&const_name, &params, driver.module_name(), w);
-        "sql"
+    if cmd == ":copyfrom" {
+        generate_copyfrom_body(&const_name, &params, w, driver);
     } else {
-        &const_name
-    };
-
-    match cmd {
-        ":one" => generate_one_body(sql_var, has_slices, &params, &columns, &row_type_name, w, driver),
-        ":many" => generate_many_body(sql_var, has_slices, &params, &columns, &row_type_name, w, driver),
-        ":exec" => generate_exec_body(sql_var, has_slices, &params, w, driver),
-        ":execrows" => generate_execrows_body(sql_var, has_slices, &params, w, driver),
-        ":execlastid" => {
-            if columns.is_empty() {
-                generate_exec_body(sql_var, has_slices, &params, w, driver);
+        let var_of = |p: &ParamInfo| {
+            if use_params_type {
+                format!("params.{}", p.name)
             } else {
-                generate_one_body(sql_var, has_slices, &params, &columns, &row_type_name, w, driver);
+                p.name.clone()
             }
+        };
+        let sql_var = if has_slices {
+            emit_slice_sql(&const_name, &params, &var_of, w);
+            "sql".to_string()
+        } else {
+            const_name.clone()
+        };
+        let params_str = emit_params(&params, &var_of, w, driver);
+        if returns_rows {
+            generate_decoder(&columns, &row_type_name, w);
         }
-        _ => {
-            eprintln!("warning: unknown query command '{cmd}' for query '{}'", query.name);
-            generate_exec_body(sql_var, has_slices, &params, w, driver);
+        match cmd {
+            ":one" => driver.write_one_call(&sql_var, &params_str, w),
+            ":many" => driver.write_many_call(&sql_var, &params_str, w),
+            ":exec" => driver.write_exec_call(&sql_var, &params_str, w),
+            ":execrows" => driver.write_execrows_call(&sql_var, &params_str, w),
+            ":execlastid" if returns_rows => driver.write_one_call(&sql_var, &params_str, w),
+            ":execlastid" => driver.write_exec_call(&sql_var, &params_str, w),
+            other => unreachable!("unsupported command {other} passed the check above"),
         }
     }
 
     w.dedent();
     w.line("}");
+    Ok(())
 }
 
 fn resolve_params(
-    params: &[crate::plugin::plugin::Parameter],
-    sql_text: &str,
+    query: &Query,
     table_map: &TableMap,
-    insert_into_table: &Option<Identifier>,
+    ctx: &TypeContext,
     driver: &dyn Driver,
-) -> Vec<ParamInfo> {
+) -> Result<Vec<ParamInfo>, String> {
     // Extract slice marker names from the SQL text: /*SLICE:xxx*/?
-    let slice_markers = extract_slice_markers(sql_text);
+    let slice_markers = extract_slice_markers(&query.text);
     let mut slice_idx = 0;
 
     // For INSERT queries where sqlc strips column names from cast params (e.g. $5::uuid),
     // build a mapping from $N -> column name by parsing the INSERT column list and VALUES.
-    let insert_param_names = build_insert_param_map(sql_text, insert_into_table);
+    let insert_param_names = build_insert_param_map(&query.text, &query.insert_into_table);
+    let mut seen_names: HashMap<String, usize> = HashMap::new();
+    let single = query.params.len() == 1 && query.cmd != ":copyfrom";
 
-    params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let col = p.column.as_ref().unwrap();
-            let is_slice = col.is_sqlc_slice;
+    let mut result = Vec::with_capacity(query.params.len());
+    for (i, p) in query.params.iter().enumerate() {
+        let col = p.column.as_ref().ok_or_else(|| {
+            format!(
+                "query '{}': parameter ${} has no column information",
+                query.name, p.number
+            )
+        })?;
+        let is_slice = col.is_sqlc_slice;
 
-            // Try to recover the column name from the INSERT mapping if sqlc stripped it
-            let recovered_name = if col.name.is_empty() && col.original_name.is_empty() {
-                insert_param_names.get(&p.number).cloned()
-            } else {
-                None
-            };
+        // Try to recover the column name from the INSERT mapping if sqlc stripped it
+        let recovered_name = if col.name.is_empty() && col.original_name.is_empty() {
+            insert_param_names.get(&p.number).cloned()
+        } else {
+            None
+        };
 
-            let raw_name = if !col.original_name.is_empty() {
-                column_to_field_name(&col.original_name)
-            } else if !col.name.is_empty() {
-                column_to_field_name(&col.name)
-            } else if let Some(ref name) = recovered_name {
-                column_to_field_name(name)
-            } else {
-                format!("param_{}", i + 1)
-            };
+        let raw_name = if !col.original_name.is_empty() {
+            column_to_field_name(&col.original_name)
+        } else if !col.name.is_empty() {
+            column_to_field_name(&col.name)
+        } else if let Some(ref name) = recovered_name {
+            column_to_field_name(name)
+        } else {
+            format!("param_{}", i + 1)
+        };
+        let mut name = deduplicate_name(&raw_name, &mut seen_names);
+        if single && LOCAL_NAMES.contains(&name.as_str()) {
+            name.push_str("_value");
+        }
 
-            let slice_marker = if is_slice {
-                let marker = slice_markers.get(slice_idx).cloned().unwrap_or_else(|| raw_name.clone());
-                slice_idx += 1;
-                marker
-            } else {
-                String::new()
-            };
+        let slice_marker = if is_slice {
+            let marker = slice_markers
+                .get(slice_idx)
+                .cloned()
+                .unwrap_or_else(|| raw_name.clone());
+            slice_idx += 1;
+            marker
+        } else {
+            String::new()
+        };
 
-            // Restore nullability from the source table column.
-            // If we recovered a column name from the INSERT mapping, inject it into the
-            // column so restore_nullability can look it up in the table catalog.
-            let effective_col = if let Some(ref name) = recovered_name {
+        // Restore nullability from the source table column. If we recovered a column
+        // name from the INSERT mapping, look it up in the INSERT target table.
+        let effective_col = match recovered_name {
+            Some(ref recovered) => {
                 let mut patched = col.clone();
-                patched.name = name.clone();
+                patched.name = recovered.clone();
                 if patched.table.is_none() {
-                    if let Some(table_id) = insert_into_table {
-                        patched.table = Some(table_id.clone());
-                    }
+                    patched.table = query.insert_into_table.clone();
                 }
                 restore_nullability(&patched, table_map)
-            } else {
-                restore_nullability(col, table_map)
-            };
-            let mut resolved = driver.resolve_param_type(&effective_col);
-
-            // For slice params, wrap the type in List() and change the param expression
-            if is_slice {
-                resolved.type_expr = format!("List({})", resolved.type_expr);
             }
+            None => restore_nullability(col, table_map),
+        };
+        let mut resolved = driver.resolve_column_type(&effective_col, ctx);
+        if is_slice {
+            resolved.type_expr = format!("List({})", resolved.type_expr);
+        }
 
-            ParamInfo {
-                name: escape_reserved(&raw_name),
-                resolved,
-                is_slice,
-                slice_marker,
-            }
-        })
-        .collect()
+        result.push(ParamInfo {
+            name,
+            resolved,
+            is_slice,
+            slice_marker,
+        });
+    }
+    Ok(result)
 }
 
 /// Extract slice marker names from SQL text (e.g., "ids" from /*SLICE:ids*/?)
@@ -198,54 +251,60 @@ fn extract_slice_markers(sql: &str) -> Vec<String> {
     markers
 }
 
-fn resolve_columns(columns: &[Column], table_map: &TableMap, query_name: &str, overrides: &[TypeOverride], driver: &dyn Driver) -> Vec<ColumnInfo> {
+fn resolve_columns(
+    columns: &[Column],
+    table_map: &TableMap,
+    query_name: &str,
+    overrides: &[TypeOverride],
+    ctx: &TypeContext,
+    driver: &dyn Driver,
+) -> Vec<ColumnInfo> {
     let mut result = Vec::new();
     let mut seen_names: HashMap<String, usize> = HashMap::new();
 
     for col in columns {
-        let has_embed = col
-            .embed_table
-            .as_ref()
-            .is_some_and(|t| !t.name.is_empty());
-
-        if has_embed {
-            let embed = col.embed_table.as_ref().unwrap();
+        let embed = col.embed_table.as_ref().filter(|t| !t.name.is_empty());
+        if let Some(embed) = embed {
             let prefix = if !col.table_alias.is_empty() {
                 column_to_field_name(&col.table_alias)
             } else {
                 column_to_field_name(&embed.name)
             };
-
-            // Look up the table in the catalog to expand embed columns
-            if let Some(table) = table_map.get(&embed.name) {
-                for table_col in &table.columns {
-                    let col_name = column_to_field_name(&table_col.name);
-                    let base_name = format!("{prefix}_{col_name}");
-                    let field_name =
-                        escape_reserved(&deduplicate_name(&base_name, &mut seen_names));
+            let table = table_map.get(&embed.name).or_else(|| {
+                (!embed.schema.is_empty())
+                    .then(|| table_map.get(&format!("{}.{}", embed.schema, embed.name)))
+                    .flatten()
+            });
+            match table {
+                // Expand the embedded table into prefixed fields.
+                Some(table) => {
+                    for table_col in &table.columns {
+                        let base_name =
+                            format!("{prefix}_{}", column_to_field_name(&table_col.name));
+                        result.push(ColumnInfo {
+                            field_name: deduplicate_name(&base_name, &mut seen_names),
+                            resolved: driver.resolve_column_type(table_col, ctx),
+                        });
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "warning: sqlc.embed({}) table not found in catalog; treating it as one column",
+                        embed.name
+                    );
                     result.push(ColumnInfo {
-                        field_name,
-                        resolved: driver.resolve_column_type(table_col),
+                        field_name: deduplicate_name(&prefix, &mut seen_names),
+                        resolved: driver.resolve_column_type(col, ctx),
                     });
                 }
-            } else {
-                // Fallback: embed table not found in catalog, treat as opaque
-                let base_name = deduplicate_name(&prefix, &mut seen_names);
-                result.push(ColumnInfo {
-                    field_name: escape_reserved(&base_name),
-                    resolved: driver.resolve_column_type(col),
-                });
             }
         } else {
-            let base_name = escape_reserved(&column_to_field_name(&col.name));
-            let field_name = deduplicate_name(&base_name, &mut seen_names);
-            let resolved = if let Some(overridden) = find_override(overrides, query_name, &col.name, driver) {
-                overridden
-            } else {
+            let field_name = deduplicate_name(&column_to_field_name(&col.name), &mut seen_names);
+            let resolved = match find_override(overrides, query_name, &col.name) {
+                Some((type_name, not_null)) => driver.resolve_override(type_name, not_null),
                 // Restore nullability from the source table column when sqlc loses it
-                // through type casts (e.g., `nullable_col::text` loses nullability info).
-                let effective_col = restore_nullability(col, table_map);
-                driver.resolve_column_type(&effective_col)
+                // through type casts (e.g., `nullable_col::text`).
+                None => driver.resolve_column_type(&restore_nullability(col, table_map), ctx),
             };
             result.push(ColumnInfo {
                 field_name,
@@ -265,7 +324,10 @@ fn resolve_columns(columns: &[Column], table_map: &TableMap, query_name: &str, o
 ///
 /// This handles the case where sqlc strips column name/table info from cast params
 /// (e.g., `$5::uuid` loses its `project_id` identity).
-pub fn build_insert_param_map(sql: &str, insert_table: &Option<Identifier>) -> HashMap<i32, String> {
+pub fn build_insert_param_map(
+    sql: &str,
+    insert_table: &Option<Identifier>,
+) -> HashMap<i32, String> {
     let mut map = HashMap::new();
 
     // Only relevant for INSERT queries with a known target table
@@ -335,8 +397,14 @@ pub fn build_insert_param_map(sql: &str, insert_table: &Option<Identifier>) -> H
     let mut paren_depth = 0;
     for ch in values_str.chars() {
         match ch {
-            '(' => { paren_depth += 1; current.push(ch); }
-            ')' => { paren_depth -= 1; current.push(ch); }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth -= 1;
+                current.push(ch);
+            }
             ',' if paren_depth == 0 => {
                 values.push(current.trim().to_string());
                 current = String::new();
@@ -356,9 +424,9 @@ pub fn build_insert_param_map(sql: &str, insert_table: &Option<Identifier>) -> H
     for (idx, val) in values.iter().enumerate() {
         // Extract $N from the value (may have ::cast suffix like "$5::uuid")
         let trimmed = val.trim();
-        if trimmed.starts_with('$') {
+        if let Some(rest) = trimmed.strip_prefix('$') {
             // Parse the number after $, stopping at non-digit (e.g., ::cast)
-            let num_str: String = trimmed[1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(num) = num_str.parse::<i32>() {
                 map.insert(num, col_list[idx].to_string());
             }
@@ -368,90 +436,78 @@ pub fn build_insert_param_map(sql: &str, insert_table: &Option<Identifier>) -> H
     map
 }
 
-/// If a column has a source table reference, look up the original column definition
-/// in the catalog to restore its nullability. This fixes the common case where
-/// `nullable_col::text` causes sqlc to mark the result as NOT NULL.
+/// sqlc can lose a column's nullability, e.g. `nullable_col::text` is reported as
+/// NOT NULL. If the column still points at its table, use the table's definition.
 ///
-/// When sqlc strips the table reference (e.g., through type casts), falls back to
-/// searching all tables by column name. If exactly one match is found, uses its
-/// nullability. If multiple matches exist, stays conservative (keeps not_null).
+/// When sqlc dropped the table reference, fall back to the catalog only if exactly
+/// one table has a column with that name. With several candidates we cannot know
+/// which one is meant, so sqlc's answer is kept.
 fn restore_nullability(col: &Column, table_map: &TableMap) -> Column {
-    // If already nullable, nothing to restore
     if !col.not_null {
         return col.clone();
     }
-
     let col_name = if !col.original_name.is_empty() {
         &col.original_name
     } else {
         &col.name
     };
-
-    // Try table reference first
-    if let Some(ref table_ref) = col.table {
-        if !table_ref.name.is_empty() {
-            let table = table_map.get(&table_ref.name).or_else(|| {
-                if !table_ref.schema.is_empty() {
-                    table_map.get(&format!("{}.{}", table_ref.schema, table_ref.name))
-                } else {
-                    None
-                }
-            });
-            if let Some(table) = table {
-                if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
-                    if !orig_col.not_null {
-                        let mut fixed = col.clone();
-                        fixed.not_null = false;
-                        return fixed;
-                    }
-                }
-            }
-            return col.clone();
-        }
+    if col_name.is_empty() {
+        return col.clone();
     }
+    let nullable_in = |table: &crate::plugin::plugin::Table| {
+        table
+            .columns
+            .iter()
+            .find(|c| c.name == *col_name)
+            .map(|c| !c.not_null)
+    };
 
-    // Fallback: no table reference (common with ::text casts).
-    // Search all tables for a column with this name.
-    let mut nullable_match = false;
-    let mut match_count = 0;
-
-    for table in table_map.values() {
-        if let Some(orig_col) = table.columns.iter().find(|c| c.name == *col_name) {
-            match_count += 1;
-            if !orig_col.not_null {
-                nullable_match = true;
+    let source_nullable = match col.table.as_ref().filter(|t| !t.name.is_empty()) {
+        Some(table_ref) => lookup_table(table_map, table_ref).and_then(nullable_in),
+        None => {
+            // table_map holds each table under its plain and its qualified name;
+            // count distinct tables only.
+            let mut seen = HashSet::new();
+            let matches: Vec<bool> = table_map
+                .values()
+                .filter(|t| seen.insert(t.rel.as_ref().map(|r| (r.schema.clone(), r.name.clone()))))
+                .filter_map(nullable_in)
+                .collect();
+            match matches.as_slice() {
+                [only] => Some(*only),
+                _ => None,
             }
         }
-    }
+    };
 
-    // Only restore nullability if the column name is unambiguous (one table)
-    // or ALL matches agree it's nullable.
-    if match_count > 0 && nullable_match {
-        let mut fixed = col.clone();
+    let mut fixed = col.clone();
+    if source_nullable == Some(true) {
         fixed.not_null = false;
-        return fixed;
     }
-
-    col.clone()
+    fixed
 }
 
-/// Find and apply a type override for a specific query+column combination.
-fn find_override(overrides: &[TypeOverride], query_name: &str, column_name: &str, driver: &dyn Driver) -> Option<ResolvedType> {
+fn lookup_table<'a>(
+    table_map: &'a TableMap,
+    id: &Identifier,
+) -> Option<&'a crate::plugin::plugin::Table> {
+    table_map.get(&id.name).or_else(|| {
+        (!id.schema.is_empty())
+            .then(|| table_map.get(&format!("{}.{}", id.schema, id.name)))
+            .flatten()
+    })
+}
+
+/// Find the type override for a query column: `(type name, not_null)`.
+fn find_override<'a>(
+    overrides: &'a [TypeOverride],
+    query_name: &str,
+    column_name: &str,
+) -> Option<(&'a str, bool)> {
     overrides.iter().find_map(|o| {
-        let parts: Vec<&str> = o.column.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        let (qname, cname) = (parts[0], parts[1]);
-        if (qname == "*" || qname == query_name) && cname == column_name {
-            if let Some(ref gleam_type) = o.gleam_type {
-                driver.resolve_override(&gleam_type.type_name, gleam_type.not_null)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        let (qname, cname) = o.column.split_once(':')?;
+        ((qname == "*" || qname == query_name) && cname == column_name)
+            .then_some((o.gleam_type.type_name.as_str(), o.gleam_type.not_null))
     })
 }
 
@@ -490,175 +546,94 @@ fn generate_params_type(name: &str, params: &[ParamInfo], w: &mut CodeWriter) {
 }
 
 fn build_fn_signature(fn_name: &str, params: &[ParamInfo], params_type_name: &str) -> String {
-    match params.len() {
-        0 => format!("{fn_name}(conn)"),
-        1 => {
-            let p = &params[0];
-            format!("{fn_name}(conn, {}: {})", p.name, p.resolved.type_expr)
-        }
+    match params {
+        [] => format!("{fn_name}(conn)"),
+        [p] => format!("{fn_name}(conn, {}: {})", p.name, p.resolved.type_expr),
         _ => format!("{fn_name}(conn, params: {params_type_name})"),
     }
 }
 
+/// Decoder with positional variable names, so column names can never shadow
+/// `decode` or other names used in the body.
 fn generate_decoder(columns: &[ColumnInfo], row_type_name: &str, w: &mut CodeWriter) {
     w.line("let decoder = {");
     w.indent();
     for (i, col) in columns.iter().enumerate() {
         w.writef(format_args!(
-            "use {} <- decode.element({i}, {})",
-            col.field_name,
+            "use c{i} <- decode.element({i}, {})",
             col.resolved.decoder_expr.to_gleam()
         ));
     }
-    let field_names: Vec<&str> = columns.iter().map(|c| c.field_name.as_str()).collect();
+    let fields: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}: c{i}", c.field_name))
+        .collect();
     w.writef(format_args!(
         "decode.success({row_type_name}({}))",
-        field_names
-            .iter()
-            .map(|f| format!("{f}:"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        fields.join(", ")
     ));
     w.dedent();
     w.line("}");
 }
 
-fn params_list_inline(params: &[ParamInfo], module_name: &str) -> String {
+/// Emit `use x_param <- result.try(...)` lines for params that must be prepared
+/// (e.g. UUID strings) and return the params list expression.
+fn emit_params(
+    params: &[ParamInfo],
+    var_of: &dyn Fn(&ParamInfo) -> String,
+    w: &mut CodeWriter,
+    driver: &dyn Driver,
+) -> String {
     if params.is_empty() {
         return "[]".into();
     }
-    let use_params_prefix = params.len() >= 2;
-    let exprs: Vec<String> = params
-        .iter()
-        .map(|p| {
-            let var = if use_params_prefix {
-                format!("params.{}", p.name)
-            } else {
-                p.name.clone()
+    let has_slices = params.iter().any(|p| p.is_slice);
+    let mut parts = Vec::with_capacity(params.len());
+    for p in params {
+        let var = var_of(p);
+        let rendered = if p.is_slice {
+            driver.render_slice_param(&p.resolved.param_expr, &var)
+        } else {
+            let value = match driver.prepare_param(&p.resolved.param_expr, &var) {
+                Some(prep) => {
+                    let bound = format!("{}_param", p.name);
+                    w.writef(format_args!("use {bound} <- result.try({prep})"));
+                    driver.render_param(&p.resolved.param_expr, &bound)
+                }
+                None => driver.render_param(&p.resolved.param_expr, &var),
             };
-            p.resolved.param_expr.to_gleam(&var, module_name)
-        })
-        .collect();
-    format!("[{}]", exprs.join(", "))
+            if has_slices {
+                format!("[{value}]")
+            } else {
+                value
+            }
+        };
+        parts.push(rendered);
+    }
+    if has_slices {
+        format!("list.flatten([{}])", parts.join(", "))
+    } else {
+        format!("[{}]", parts.join(", "))
+    }
 }
 
-/// Emit SQL expansion code for slice parameters.
-/// Generates `let sql = ...` and `let params = list.flatten([...])`.
-fn emit_slice_expansion(
+/// Emit `let sql = ...` replacing each /*SLICE:name*/? marker with one `?` per item.
+fn emit_slice_sql(
     const_name: &str,
     params: &[ParamInfo],
-    module_name: &str,
+    var_of: &dyn Fn(&ParamInfo) -> String,
     w: &mut CodeWriter,
 ) {
-    // Build SQL expansion: replace /*SLICE:name*/? with ?,?,?
-    let slice_params: Vec<&ParamInfo> = params.iter().filter(|p| p.is_slice).collect();
-    if slice_params.len() == 1 {
-        let sp = slice_params[0];
-        let var = if params.len() >= 2 {
-            format!("params.{}", sp.name)
-        } else {
-            sp.name.clone()
-        };
+    let mut current = const_name.to_string();
+    for sp in params.iter().filter(|p| p.is_slice) {
+        let var = var_of(sp);
         w.writef(format_args!(
-            "let sql = string.replace({const_name}, \"/*SLICE:{}*/?\", string.join(list.repeat(\"?\", list.length({var})), \", \"))",
-            sp.slice_marker
+            "let sql = string.replace({current}, \"/*SLICE:{}*/?\", string.join(list.repeat(\"?\", list.length({var})), \", \"))",
+            escape_gleam_string(&sp.slice_marker)
         ));
-    } else {
-        w.writef(format_args!("let sql = {const_name}"));
-        for sp in &slice_params {
-            let var = if params.len() >= 2 {
-                format!("params.{}", sp.name)
-            } else {
-                sp.name.clone()
-            };
-            w.writef(format_args!(
-                "let sql = string.replace(sql, \"/*SLICE:{}*/?\", string.join(list.repeat(\"?\", list.length({var})), \", \"))",
-                sp.slice_marker
-            ));
-        }
+        current = "sql".to_string();
     }
-
-    // Build flattened params list
-    let use_prefix = params.len() >= 2;
-    let mut parts: Vec<String> = Vec::new();
-    for p in params {
-        let var = if use_prefix {
-            format!("params.{}", p.name)
-        } else {
-            p.name.clone()
-        };
-        if p.is_slice {
-            parts.push(format!("list.map({var}, {module_name}.{inner})",
-                inner = extract_simple_fn_name(&p.resolved.param_expr)));
-        } else {
-            parts.push(format!("[{}]", p.resolved.param_expr.to_gleam(&var, module_name)));
-        }
-    }
-    w.writef(format_args!("let params = list.flatten([{}])", parts.join(", ")));
-}
-
-/// Extract the simple function name from a ParamExpr::Direct for use in list.map.
-fn extract_simple_fn_name(param_expr: &crate::driver::type_map::ParamExpr) -> String {
-    match param_expr {
-        crate::driver::type_map::ParamExpr::Direct { fn_name } => {
-            // fn_name is like "glite.int" — extract just "int"
-            fn_name.rsplit('.').next().unwrap_or(fn_name).to_string()
-        }
-        _ => "text".to_string(), // fallback
-    }
-}
-
-fn generate_one_body(
-    sql_var: &str,
-    has_slices: bool,
-    params: &[ParamInfo],
-    columns: &[ColumnInfo],
-    row_type_name: &str,
-    w: &mut CodeWriter,
-    driver: &dyn Driver,
-) {
-    generate_decoder(columns, row_type_name, w);
-    let params_str = if has_slices { "params".to_string() } else { params_list_inline(params, driver.module_name()) };
-    driver.write_one_call(sql_var, &params_str, w);
-}
-
-fn generate_many_body(
-    sql_var: &str,
-    has_slices: bool,
-    params: &[ParamInfo],
-    columns: &[ColumnInfo],
-    row_type_name: &str,
-    w: &mut CodeWriter,
-    driver: &dyn Driver,
-) {
-    generate_decoder(columns, row_type_name, w);
-    let params_str = if has_slices { "params".to_string() } else { params_list_inline(params, driver.module_name()) };
-    driver.write_many_call(sql_var, &params_str, w);
-}
-
-fn generate_exec_body(
-    sql_var: &str,
-    has_slices: bool,
-    params: &[ParamInfo],
-    w: &mut CodeWriter,
-    driver: &dyn Driver,
-) {
-    let params_str = if has_slices { "params".to_string() } else { params_list_inline(params, driver.module_name()) };
-    driver.write_exec_call(sql_var, &params_str, w);
-}
-
-fn copyfrom_params_list(params: &[ParamInfo], module_name: &str) -> String {
-    if params.is_empty() {
-        return "[]".into();
-    }
-    let exprs: Vec<String> = params
-        .iter()
-        .map(|p| {
-            let var = format!("row.{}", p.name);
-            p.resolved.param_expr.to_gleam(&var, module_name)
-        })
-        .collect();
-    format!("[{}]", exprs.join(", "))
 }
 
 fn generate_copyfrom_body(
@@ -667,38 +642,44 @@ fn generate_copyfrom_body(
     w: &mut CodeWriter,
     driver: &dyn Driver,
 ) {
-    let params_str = copyfrom_params_list(params, driver.module_name());
-    w.line("list.try_each(rows, fn(row) {");
-    w.indent();
-    driver.write_exec_call(const_name, &params_str, w);
-    w.line("|> result.map(fn(_) { Nil })");
-    w.dedent();
-    w.line("})");
-}
-
-fn generate_execrows_body(
-    sql_var: &str,
-    has_slices: bool,
-    params: &[ParamInfo],
-    w: &mut CodeWriter,
-    driver: &dyn Driver,
-) {
-    let params_str = if has_slices { "params".to_string() } else { params_list_inline(params, driver.module_name()) };
-    driver.write_execrows_call(sql_var, &params_str, w);
-}
-
-fn escape_gleam_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    let needs_prep = params.iter().any(|p| {
+        driver
+            .prepare_param(&p.resolved.param_expr, "row")
+            .is_some()
+    });
+    if needs_prep {
+        w.line("use param_sets <- result.try(list.try_map(rows, fn(row) {");
+        w.indent();
+        let list = emit_params(
+            params,
+            &|p: &ParamInfo| format!("row.{}", p.name),
+            w,
+            driver,
+        );
+        w.writef(format_args!("Ok({list})"));
+        w.dedent();
+        w.line("}))");
+    } else {
+        w.line("let param_sets = list.map(rows, fn(row) {");
+        w.indent();
+        let list = emit_params(
+            params,
+            &|p: &ParamInfo| format!("row.{}", p.name),
+            w,
+            driver,
+        );
+        w.line(&list);
+        w.dedent();
+        w.line("})");
+    }
+    driver.write_copyfrom_call(const_name, "param_sets", w);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::driver::postgres::PostgresDriver;
+    use crate::driver::traits::Driver;
     use crate::options::Options;
     use crate::plugin::plugin::{Column, Identifier, Parameter, Query, Table};
 
@@ -764,7 +745,7 @@ mod tests {
             make_column("user_id", "text", true),
             make_column("title", "text", true),
             make_column("project_id", "uuid", false), // nullable
-            make_column("task_id", "uuid", false),     // nullable
+            make_column("task_id", "uuid", false),    // nullable
         ];
         let table_map = make_table_map("threads", table_columns);
 
@@ -807,7 +788,9 @@ mod tests {
         let driver = PostgresDriver::new(&options);
 
         let mut w = CodeWriter::new();
-        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        generate_query_fn(&query, &table_map, &[], &ctx, &mut w, &driver).unwrap();
         let output = w.into_string();
 
         // The params type should have Option(String) for project_id and task_id
@@ -818,8 +801,8 @@ mod tests {
 
         // The param expressions should use nullable wrapping with value constructors
         assert!(
-            output.contains("option.Some(v) -> Some(value.Text(v))  option.None -> None"),
-            "Expected nullable param wrapping with value.Text, got:\n{output}"
+            output.contains("case params.project_id { option.Some(u) -> uuid_param(u) |> result.map(Some)  option.None -> Ok(None) }"),
+            "Expected nullable UUID strings to be parsed, got:\n{output}"
         );
 
         // user_id and title should NOT be Option
@@ -876,7 +859,9 @@ mod tests {
         let driver = PostgresDriver::new(&options);
 
         let mut w = CodeWriter::new();
-        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        generate_query_fn(&query, &table_map, &[], &ctx, &mut w, &driver).unwrap();
         let output = w.into_string();
 
         // No Option types should appear for non-nullable params
@@ -919,7 +904,9 @@ mod tests {
         let driver = PostgresDriver::new(&options);
 
         let mut w = CodeWriter::new();
-        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        generate_query_fn(&query, &table_map, &[], &ctx, &mut w, &driver).unwrap();
         let output = w.into_string();
 
         // Single param should be in the function signature with Option type
@@ -928,7 +915,7 @@ mod tests {
             "Expected bio: Option(String) in function signature, got:\n{output}"
         );
         assert!(
-            output.contains("case bio { option.Some(v) -> Some(value.Text(v))  option.None -> None }"),
+            output.contains("[option.map(bio, value.Text)]"),
             "Expected nullable param wrapping with value.Text, got:\n{output}"
         );
     }
@@ -942,9 +929,9 @@ mod tests {
             make_column("id", "uuid", true),
             make_column("user_id", "text", true),
             make_column("title", "text", true),
-            make_column("model", "text", false),       // nullable
-            make_column("project_id", "uuid", false),  // nullable
-            make_column("task_id", "uuid", false),      // nullable
+            make_column("model", "text", false),      // nullable
+            make_column("project_id", "uuid", false), // nullable
+            make_column("task_id", "uuid", false),    // nullable
         ];
         let table_map = make_table_map("threads", table_columns);
 
@@ -1016,7 +1003,9 @@ mod tests {
         let driver = PostgresDriver::new(&options);
 
         let mut w = CodeWriter::new();
-        generate_query_fn(&query, &table_map, &[], &mut w, &driver);
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        generate_query_fn(&query, &table_map, &[], &ctx, &mut w, &driver).unwrap();
         let output = w.into_string();
 
         // project_id and task_id should be recovered as Option(String)
@@ -1031,8 +1020,8 @@ mod tests {
 
         // Should use nullable wrapping for these params
         assert!(
-            output.contains("option.Some(v) -> Some(value.Text(v))  option.None -> None"),
-            "Expected nullable param wrapping with value.Text, got:\n{output}"
+            output.contains("case params.project_id { option.Some(u) -> uuid_param(u) |> result.map(Some)  option.None -> Ok(None) }"),
+            "Expected nullable UUID strings to be parsed, got:\n{output}"
         );
 
         // user_id and title should remain non-optional
@@ -1049,6 +1038,184 @@ mod tests {
         assert!(
             output.contains("model: Option(String)"),
             "Expected model: Option(String), got:\n{output}"
+        );
+    }
+
+    fn render(query: &Query, table_map: &TableMap, driver: &dyn Driver) -> Result<String, String> {
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        let mut w = CodeWriter::new();
+        generate_query_fn(query, table_map, &[], &ctx, &mut w, driver)?;
+        Ok(w.into_string())
+    }
+
+    fn simple_query(
+        name: &str,
+        cmd: &str,
+        text: &str,
+        columns: Vec<Column>,
+        params: Vec<Parameter>,
+    ) -> Query {
+        Query {
+            text: text.into(),
+            name: name.into(),
+            cmd: cmd.into(),
+            columns,
+            params,
+            comments: vec![],
+            filename: "q.sql".into(),
+            insert_into_table: None,
+        }
+    }
+
+    #[test]
+    fn test_ambiguous_column_name_keeps_sqlc_nullability() {
+        // users.email is NOT NULL, profiles.email is nullable. A cast drops the
+        // table reference; with two candidates the plugin must not guess.
+        let mut table_map = make_table_map("users", vec![make_column("email", "text", true)]);
+        table_map.extend(make_table_map(
+            "profiles",
+            vec![make_column("email", "text", false)],
+        ));
+        let mut c = make_column("email", "text", true);
+        c.table = None;
+        let q = simple_query(
+            "GetEmail",
+            ":many",
+            "SELECT email::text AS email FROM users",
+            vec![c.clone()],
+            vec![],
+        );
+        let out = render(&q, &table_map, &PostgresDriver::new(&Options::default())).unwrap();
+        assert!(out.contains("GetEmailRow(email: String)"), "{out}");
+
+        // With a single candidate the catalog wins.
+        let table_map = make_table_map("profiles", vec![make_column("email", "text", false)]);
+        let out = render(&q, &table_map, &PostgresDriver::new(&Options::default())).unwrap();
+        assert!(out.contains("GetEmailRow(email: Option(String))"), "{out}");
+    }
+
+    #[test]
+    fn test_unsupported_command_is_an_error() {
+        let q = simple_query("Batch", ":batchexec", "SELECT 1", vec![], vec![]);
+        let err = render(
+            &q,
+            &TableMap::new(),
+            &PostgresDriver::new(&Options::default()),
+        )
+        .unwrap_err();
+        assert!(err.contains(":batchexec"), "{err}");
+    }
+
+    #[test]
+    fn test_lone_param_named_like_a_local_is_renamed() {
+        let table_map = make_table_map("t", vec![make_column("decoder", "int4", true)]);
+        let q = simple_query(
+            "GetByDecoder",
+            ":one",
+            "SELECT decoder FROM t WHERE decoder = $1",
+            vec![make_param_column("decoder", "int4", true, "t")],
+            vec![Parameter {
+                number: 1,
+                column: Some(make_param_column("decoder", "int4", true, "t")),
+            }],
+        );
+        let out = render(&q, &table_map, &PostgresDriver::new(&Options::default())).unwrap();
+        assert!(
+            out.contains("pub fn get_by_decoder(conn, decoder_value: Int)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("use c0 <- decode.element(0, decode.int)"),
+            "{out}"
+        );
+        assert!(out.contains("GetByDecoderRow(decoder: c0)"), "{out}");
+    }
+
+    #[test]
+    fn test_copyfrom_postgres_uses_query_batch() {
+        let table_map = make_table_map(
+            "t",
+            vec![
+                make_column("a", "text", true),
+                make_column("b", "int4", false),
+            ],
+        );
+        let q = simple_query(
+            "InsertMany",
+            ":copyfrom",
+            "INSERT INTO t (a, b) VALUES ($1, $2)",
+            vec![],
+            vec![
+                Parameter {
+                    number: 1,
+                    column: Some(make_param_column("a", "text", true, "t")),
+                },
+                Parameter {
+                    number: 2,
+                    column: Some(make_param_column("b", "int4", false, "t")),
+                },
+            ],
+        );
+        let out = render(&q, &table_map, &PostgresDriver::new(&Options::default())).unwrap();
+        assert!(
+            out.contains("let param_sets = list.map(rows, fn(row) {"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[Some(value.Text(row.a)), option.map(row.b, value.Integer)]"),
+            "{out}"
+        );
+        assert!(
+            out.contains("postgleam.query_batch(conn, insert_many_sql, param_sets)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_sqlite_params_are_not_wrapped() {
+        use crate::driver::sqlite::SqliteDriver;
+        let table_map = make_table_map(
+            "t",
+            vec![
+                make_column("a", "text", true),
+                make_column("b", "integer", false),
+            ],
+        );
+        let q = simple_query(
+            "Insert",
+            ":exec",
+            "INSERT INTO t (a, b) VALUES (?, ?)",
+            vec![],
+            vec![
+                Parameter {
+                    number: 1,
+                    column: Some(make_param_column("a", "text", true, "t")),
+                },
+                Parameter {
+                    number: 2,
+                    column: Some(make_param_column("b", "integer", false, "t")),
+                },
+            ],
+        );
+        let out = render(&q, &table_map, &SqliteDriver::new(&Options::default())).unwrap();
+        assert!(out.contains("glite.exec(conn, insert_sql, [glite.text(params.a), glite.nullable(params.b, glite.int)])"), "{out}");
+        assert!(!out.contains("Some("), "{out}");
+    }
+
+    #[test]
+    fn test_query_comments_become_docs() {
+        let mut q = simple_query("Ping", ":exec", "SELECT 1", vec![], vec![]);
+        q.comments = vec![" Checks the connection.".into()];
+        let out = render(
+            &q,
+            &TableMap::new(),
+            &PostgresDriver::new(&Options::default()),
+        )
+        .unwrap();
+        assert!(
+            out.contains("/// Checks the connection.\npub fn ping(conn) {"),
+            "{out}"
         );
     }
 }
