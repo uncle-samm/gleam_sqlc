@@ -70,10 +70,13 @@ jobs:
           PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d sqlc_test -v ON_ERROR_STOP=1 -f -
 
       - name: Generate Gleam code
+        id: generate
         run: make generate
 
       - name: PostgreSQL E2E tests
         run: cd end2end/gleam_test_project && gleam test
 
+      # Runs even when the PostgreSQL suite fails, so both results show.
       - name: SQLite E2E tests
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
         run: cd end2end/gleam_sqlite_test_project && gleam test
