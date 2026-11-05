@@ -2,3 +2,6 @@
 rust = "latest"
 sqlc = "1.30.0"
 protoc = "29.6"
+gleam = "1.19.2"
+erlang = "28"
+rebar = "3"

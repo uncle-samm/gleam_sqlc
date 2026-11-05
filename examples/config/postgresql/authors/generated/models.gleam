@@ -8,16 +8,16 @@ pub type ExtendedBioType {
   Memoir
 }
 
-pub fn extended_bio_type_to_string(val: ExtendedBioType) -> String {
-  case val {
+pub fn extended_bio_type_to_string(value: ExtendedBioType) -> String {
+  case value {
     Autobiography -> "Autobiography"
     Biography -> "Biography"
     Memoir -> "Memoir"
   }
 }
 
-pub fn extended_bio_type_from_string(s: String) -> Result(ExtendedBioType, Nil) {
-  case s {
+pub fn extended_bio_type_from_string(value: String) -> Result(ExtendedBioType, Nil) {
+  case value {
     "Autobiography" -> Ok(Autobiography)
     "Biography" -> Ok(Biography)
     "Memoir" -> Ok(Memoir)
@@ -33,6 +33,6 @@ pub type Book {
   Book(id: BitArray, name: String, author_id: Int, description: Option(String))
 }
 
-pub type Bio {
-  Bio(author_name: String, name: String, bio_type: Option(String))
+pub type ExtendedBio {
+  ExtendedBio(author_name: String, name: String, bio_type: Option(ExtendedBioType))
 }

@@ -7,8 +7,8 @@ import gleeunit
 import gleeunit/should
 import glite
 import glite/config
-import glite/error
 import generated/query
+import generated/tx/query as tx_query
 
 pub fn main() {
   gleeunit.main()
@@ -98,10 +98,10 @@ pub fn test_many_test() {
   let result =
     query.list_authors(conn, query.ListAuthorsParams(offset: 0, limit: 10))
     |> should.be_ok()
-  should.equal(result.count, 2)
+  should.equal(list.length(result), 2)
 
   // Check ordering (by name): Bojack < Dr. Seuss
-  let first = list.first(result.rows) |> should.be_ok()
+  let first = list.first(result) |> should.be_ok()
   should.equal(first.name, "Bojack Horseman")
 
   cleanup(conn)
@@ -214,7 +214,7 @@ pub fn test_narg_null_test() {
   // With None pattern, COALESCE defaults to '%' — matches all
   let result =
     query.get_author_by_name_pattern(conn, None) |> should.be_ok()
-  should.equal(result.count, 2)
+  should.equal(list.length(result), 2)
 
   cleanup(conn)
   glite.disconnect(conn)
@@ -237,7 +237,7 @@ pub fn test_narg_not_null_test() {
 
   let result =
     query.get_author_by_name_pattern(conn, Some("Found")) |> should.be_ok()
-  should.equal(result.count, 1)
+  should.equal(list.length(result), 1)
 
   cleanup(conn)
   glite.disconnect(conn)
@@ -285,10 +285,10 @@ pub fn test_join_embed_test() {
   |> should.be_ok()
 
   let result = query.list_all_authors_books(conn) |> should.be_ok()
-  should.equal(result.count, 2)
+  should.equal(list.length(result), 2)
 
   // Ordered by author name: Bojack < Dr. Seuss
-  let first = list.first(result.rows) |> should.be_ok()
+  let first = list.first(result) |> should.be_ok()
   should.equal(first.authors_name, "Bojack Horseman")
   should.equal(first.books_name, "One Trick Pony")
   should.equal(first.books_author_id, 1111)
@@ -321,9 +321,9 @@ pub fn test_self_join_embed_test() {
   |> should.be_ok()
 
   let result = query.get_duplicate_authors(conn) |> should.be_ok()
-  should.equal(result.count, 1)
+  should.equal(list.length(result), 1)
 
-  let row = list.first(result.rows) |> should.be_ok()
+  let row = list.first(result) |> should.be_ok()
   should.equal(row.authors_name, "Albert Einstein")
   should.equal(row.authors_name_2, "Albert Einstein")
   should.be_true(row.authors_id < row.authors_id_2)
@@ -340,13 +340,12 @@ pub fn test_transaction_test() {
   let conn = connect()
   setup(conn)
 
-  glite.transaction(conn, fn(conn) {
-    query.create_author(
-      conn,
-      query.CreateAuthorParams(id: 1, name: "TxnAuthor", bio: None),
+  // Statements inside a transaction use the queries generated for glite/tx.
+  glite.transaction(conn, glite.Immediate, fn(tx) {
+    tx_query.create_author(
+      tx,
+      tx_query.CreateAuthorParams(id: 1, name: "TxnAuthor", bio: None),
     )
-    |> should.be_ok()
-    Ok(Nil)
   })
   |> should.be_ok()
 
@@ -361,15 +360,15 @@ pub fn test_transaction_rollback_test() {
   let conn = connect()
   setup(conn)
 
-  glite.transaction(conn, fn(conn) {
-    query.create_author(
-      conn,
-      query.CreateAuthorParams(id: 1, name: "RollbackAuthor", bio: None),
+  glite.transaction(conn, glite.Immediate, fn(tx) {
+    tx_query.create_author(
+      tx,
+      tx_query.CreateAuthorParams(id: 1, name: "RollbackAuthor", bio: None),
     )
     |> should.be_ok()
-    Error(error.ConnectionError("rollback"))
+    Error("rollback")
   })
-  |> should.be_error()
+  |> should.equal(Error(glite.RolledBack("rollback")))
 
   // Author should NOT exist after rollback
   let result = query.get_author(conn, "RollbackAuthor")
@@ -494,9 +493,9 @@ pub fn test_slice_test() {
   |> should.be_ok()
 
   let result = query.get_authors_by_ids(conn, [1, 3]) |> should.be_ok()
-  should.equal(result.count, 2)
+  should.equal(list.length(result), 2)
 
-  let first = list.first(result.rows) |> should.be_ok()
+  let first = list.first(result) |> should.be_ok()
   should.be_true(first.id == 1 || first.id == 3)
 
   cleanup(conn)
@@ -532,7 +531,7 @@ pub fn test_multiple_slices_test() {
       ),
     )
     |> should.be_ok()
-  should.equal(result.count, 2)
+  should.equal(list.length(result), 2)
 
   cleanup(conn)
   glite.disconnect(conn)

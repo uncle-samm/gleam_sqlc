@@ -2,21 +2,13 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, Some}
 import gleam/result
 import gleam/string
 import postgleam
 import postgleam/decode
-
-/// Parse affected row count from a PostgreSQL command tag.
-/// Tags look like "UPDATE 5", "DELETE 2", "INSERT 0 1".
-fn parse_affected_rows(tag: String) -> Int {
-  tag
-    |> string.split(" ")
-    |> list.last()
-    |> result.try(int.parse)
-    |> result.unwrap(0)
-}
+import postgleam/error
+import postgleam/value
 
 const get_author_sql = "SELECT id, name, bio FROM authors WHERE name = $1 LIMIT 1"
 
@@ -26,12 +18,12 @@ pub type GetAuthorRow {
 
 pub fn get_author(conn, name: String) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(GetAuthorRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(GetAuthorRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, get_author_sql, [postgleam.text(name)], decoder)
+  postgleam.query_one(conn, get_author_sql, [Some(value.Text(name))], decoder)
 }
 
 const list_authors_sql = "SELECT id, name, bio FROM authors ORDER BY name"
@@ -42,10 +34,10 @@ pub type ListAuthorsRow {
 
 pub fn list_authors(conn) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(ListAuthorsRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(ListAuthorsRow(id: c0, name: c1, bio: c2))
   }
   postgleam.query_with(conn, list_authors_sql, [], decoder)
 }
@@ -62,23 +54,35 @@ pub type CreateAuthorParams {
 
 pub fn create_author(conn, params: CreateAuthorParams) {
   let decoder = {
-    use id <- decode.element(0, decode.int)
-    use name <- decode.element(1, decode.text)
-    use bio <- decode.element(2, decode.optional(decode.text))
-    decode.success(CreateAuthorRow(id:, name:, bio:))
+    use c0 <- decode.element(0, decode.int)
+    use c1 <- decode.element(1, decode.text)
+    use c2 <- decode.element(2, decode.optional(decode.text))
+    decode.success(CreateAuthorRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_one(conn, create_author_sql, [postgleam.int(params.id), postgleam.text(params.name), postgleam.nullable(params.bio, postgleam.text)], decoder)
+  postgleam.query_one(conn, create_author_sql, [Some(value.Integer(params.id)), Some(value.Text(params.name)), option.map(params.bio, value.Text)], decoder)
 }
 
 const delete_author_sql = "DELETE FROM authors WHERE name = $1"
 
 pub fn delete_author(conn, name: String) {
-  postgleam.query(conn, delete_author_sql, [postgleam.text(name)])
+  postgleam.query(conn, delete_author_sql, [Some(value.Text(name))])
+  |> result.replace(Nil)
 }
 
 const update_authors_sql = "UPDATE authors SET bio = $1 WHERE bio IS NOT NULL"
 
 pub fn update_authors(conn, bio: Option(String)) {
-  postgleam.query(conn, update_authors_sql, [postgleam.nullable(bio, postgleam.text)])
-  |> result.map(fn(r) { parse_affected_rows(r.tag) })
+  postgleam.query(conn, update_authors_sql, [option.map(bio, value.Text)])
+  |> result.try(fn(r) { affected_rows(r.tag) })
+}
+
+/// Parse the affected row count from a PostgreSQL command tag such as
+/// "UPDATE 5", "DELETE 2" or "INSERT 0 1".
+fn affected_rows(tag: String) -> Result(Int, error.Error) {
+  case list.last(string.split(tag, " ")) {
+    Ok(count) ->
+      int.parse(count)
+      |> result.replace_error(error.DecodeError("unexpected command tag: " <> tag))
+    Error(Nil) -> Error(error.DecodeError("empty command tag"))
+  }
 }

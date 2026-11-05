@@ -3,7 +3,7 @@ plugins:
   - name: gleam
     wasm:
       url: file://../../target/wasm32-wasip1/release/sqlc-gen-gleam.wasm
-      sha256: b343d049d30068496a3e2299da13482161fe19fc48ba53e10b3e248801251b00
+      sha256: "1df91c0fd9fe345a7cf562c999922ce30d12ce7d07e9fafc7bd57243690439cb"
 sql:
   - schema: "postgresql/authors/schema.sql"
     queries: "postgresql/authors/query.sql"
@@ -11,9 +11,25 @@ sql:
     codegen:
       - plugin: gleam
         out: "postgresql/authors/generated"
+        options:
+          modelsModule: "generated/models"
   - schema: "postgresql/types/schema.sql"
     queries: "postgresql/types/query.sql"
     engine: "postgresql"
     codegen:
       - plugin: gleam
         out: "postgresql/types/generated"
+        options:
+          modelsModule: "generated/models"
+  - schema: "sqlite/authors/schema.sql"
+    queries: "sqlite/authors/query.sql"
+    engine: "sqlite"
+    codegen:
+      - plugin: gleam
+        out: "sqlite/authors/generated"
+  - schema: "sqlite/types/schema.sql"
+    queries: "sqlite/types/query.sql"
+    engine: "sqlite"
+    codegen:
+      - plugin: gleam
+        out: "sqlite/types/generated"

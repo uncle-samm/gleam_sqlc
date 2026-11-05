@@ -1,16 +1,20 @@
-use crate::driver::traits::{path_alias, Driver};
-use crate::driver::type_map::{DecoderExpr, GleamType, ParamExpr, ResolvedType};
+use crate::driver::traits::{Driver, path_alias, uses_module};
+use crate::driver::type_map::{GleamType, ParamExpr, ResolvedType, TypeContext};
 use crate::options::Options;
 use crate::plugin::plugin::Column;
 use crate::utils::CodeWriter;
 
+/// Generates code for [glite](https://hex.pm/packages/glite).
 pub struct SqliteDriver {
-    /// Full import path, e.g., "glite" or "my/sqlite"
+    /// Full import path, e.g., "glite" or "glite/tx"
     import: String,
-    /// Module alias (last segment), e.g., "glite" or "sqlite"
+    /// Module alias (last segment), e.g., "glite" or "tx"
     alias: String,
     /// Full decode import path
     decode_import: String,
+    /// Module holding the param constructors (`int`, `text`, `nullable`, ...).
+    /// `glite/tx` has none, so in that case they come from `glite`.
+    value_module: String,
 }
 
 impl SqliteDriver {
@@ -20,14 +24,23 @@ impl SqliteDriver {
             .clone()
             .unwrap_or_else(|| "glite".to_string());
         let alias = path_alias(&import);
-        let decode_import = options
-            .decode_module
-            .clone()
-            .unwrap_or_else(|| format!("{import}/decode"));
+        let decode_import = options.decode_module.clone().unwrap_or_else(|| {
+            if import == "glite/tx" {
+                "glite/decode".to_string()
+            } else {
+                format!("{import}/decode")
+            }
+        });
+        let value_module = if import == "glite/tx" {
+            "glite".to_string()
+        } else {
+            alias.clone()
+        };
         Self {
             import,
             alias,
             decode_import,
+            value_module,
         }
     }
 }
@@ -45,57 +58,107 @@ impl Driver for SqliteDriver {
         &self.decode_import
     }
 
-    fn resolve_column_type(&self, col: &Column) -> ResolvedType {
+    fn resolve_column_type(&self, col: &Column, _ctx: &TypeContext) -> ResolvedType {
         let col_type = col
             .r#type
             .as_ref()
             .map(|t| t.name.as_str())
             .unwrap_or("text");
-        let base = sqlite_type_to_gleam(col_type, &self.alias);
-        let is_nullable = !col.not_null;
+        let base = sqlite_type_to_gleam(col_type, &self.value_module);
+        // SQLite has no array types.
+        ResolvedType::from_base(base, !col.not_null, false, None)
+    }
 
-        // SQLite doesn't have native array types
-        if is_nullable {
-            ResolvedType {
-                type_expr: format!("Option({})", base.type_name),
-                param_expr: ParamExpr::Nullable {
-                    inner_fn: base.param_fn,
-                },
-                decoder_expr: DecoderExpr::Optional {
-                    inner_fn: base.decoder_fn,
-                },
-            }
-        } else {
-            ResolvedType {
-                type_expr: base.type_name,
-                param_expr: ParamExpr::Direct {
-                    fn_name: base.param_fn,
-                },
-                decoder_expr: DecoderExpr::Direct {
-                    fn_name: base.decoder_fn,
-                },
+    fn override_base(&self, type_name: &str) -> GleamType {
+        let m = &self.value_module;
+        match type_name {
+            "String" => GleamType::simple("String", &format!("{m}.text"), "decode.text"),
+            "Int" => GleamType::simple("Int", &format!("{m}.int"), "decode.int"),
+            "Float" => GleamType::simple("Float", &format!("{m}.float"), "decode.float"),
+            "Bool" => GleamType::simple("Bool", &format!("{m}.bool"), "decode.bool"),
+            "BitArray" => GleamType::simple("BitArray", &format!("{m}.blob"), "decode.blob"),
+            other => {
+                unreachable!("override type '{other}' should have been rejected by Options::parse")
             }
         }
     }
 
-    fn execrows_needs_tag_parse(&self) -> bool {
-        false
+    fn render_param(&self, expr: &ParamExpr, var: &str) -> String {
+        let m = &self.value_module;
+        match expr {
+            ParamExpr::Value {
+                fn_name,
+                arity: 1,
+                nullable: false,
+            } => format!("{fn_name}({var})"),
+            ParamExpr::Value {
+                fn_name,
+                arity: 1,
+                nullable: true,
+            } => {
+                format!("{m}.nullable({var}, {fn_name})")
+            }
+            other => unreachable!("SQLite driver never produces {other:?}"),
+        }
     }
 
-    fn write_exec_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
+    fn render_slice_param(&self, expr: &ParamExpr, var: &str) -> String {
+        let m = &self.value_module;
+        match expr {
+            ParamExpr::Value {
+                fn_name,
+                arity: 1,
+                nullable: false,
+            } => format!("list.map({var}, {fn_name})"),
+            ParamExpr::Value {
+                fn_name,
+                arity: 1,
+                nullable: true,
+            } => {
+                format!("list.map({var}, fn(v) {{ {m}.nullable(v, {fn_name}) }})")
+            }
+            other => unreachable!("SQLite driver never produces {other:?}"),
+        }
+    }
+
+    fn extra_imports(&self, body: &str) -> Vec<String> {
+        if self.value_module != self.alias && uses_module(body, &self.value_module) {
+            vec![self.value_module.clone()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn write_helpers(&self, _body: &str, _ctx: &TypeContext, _w: &mut CodeWriter) {}
+
+    fn write_one_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
         let m = self.module_name();
-        // glite.exec returns Result(Int, Error) — the Int is discarded for :exec
         w.writef(format_args!(
-            "{m}.exec(conn, {const_name}, {params_str})"
+            "{m}.query_one(conn, {sql}, {params}, decoder)"
         ));
     }
 
-    fn write_execrows_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
+    fn write_many_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
         let m = self.module_name();
-        // glite.exec returns Result(Int, Error) — the Int IS the affected row count
-        w.writef(format_args!(
-            "{m}.exec(conn, {const_name}, {params_str})"
-        ));
+        w.writef(format_args!("{m}.query(conn, {sql}, {params}, decoder)"));
+    }
+
+    fn write_exec_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
+        let m = self.module_name();
+        w.writef(format_args!("{m}.exec(conn, {sql}, {params})"));
+        w.line("|> result.replace(Nil)");
+    }
+
+    fn write_execrows_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
+        let m = self.module_name();
+        // exec returns the number of rows changed.
+        w.writef(format_args!("{m}.exec(conn, {sql}, {params})"));
+    }
+
+    fn write_copyfrom_call(&self, sql: &str, param_sets: &str, w: &mut CodeWriter) {
+        let m = self.module_name();
+        // exec_many is all or nothing and returns the rows changed in total.
+        w.writef(format_args!("{m}.exec_many(conn, {sql}, {param_sets})"));
     }
 }
 
@@ -125,8 +188,8 @@ fn sqlite_type_to_gleam(sqlite_type: &str, module: &str) -> GleamType {
         }
 
         // Text affinity
-        "TEXT" | "CHARACTER" | "VARCHAR" | "VARYING CHARACTER" | "NCHAR"
-        | "NATIVE CHARACTER" | "NVARCHAR" | "CLOB" => {
+        "TEXT" | "CHARACTER" | "VARCHAR" | "VARYING CHARACTER" | "NCHAR" | "NATIVE CHARACTER"
+        | "NVARCHAR" | "CLOB" => {
             GleamType::simple("String", &format!("{module}.text"), "decode.text")
         }
 
@@ -134,7 +197,9 @@ fn sqlite_type_to_gleam(sqlite_type: &str, module: &str) -> GleamType {
         "BLOB" => GleamType::simple("BitArray", &format!("{module}.blob"), "decode.blob"),
 
         // Numeric affinity (decimal/numeric → String since Gleam has no Decimal)
-        "NUMERIC" | "DECIMAL" => GleamType::simple("String", &format!("{module}.text"), "decode.text"),
+        "NUMERIC" | "DECIMAL" => {
+            GleamType::simple("String", &format!("{module}.text"), "decode.text")
+        }
 
         // Date/time types (stored as TEXT in SQLite, or INTEGER for unix epoch)
         "DATE" | "DATETIME" | "TIMESTAMP" => {
@@ -163,9 +228,7 @@ fn sqlite_type_to_gleam(sqlite_type: &str, module: &str) -> GleamType {
             {
                 GleamType::simple("Float", &format!("{module}.float"), "decode.float")
             } else {
-                eprintln!(
-                    "warning: unknown SQLite type '{sqlite_type}', falling back to String"
-                );
+                eprintln!("warning: unknown SQLite type '{sqlite_type}', falling back to String");
                 GleamType::simple("String", &format!("{module}.text"), "decode.text")
             }
         }
@@ -178,8 +241,16 @@ mod tests {
 
     #[test]
     fn test_integer_types() {
-        for t in &["INTEGER", "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT", "INT2", "INT8"]
-        {
+        for t in &[
+            "INTEGER",
+            "INT",
+            "TINYINT",
+            "SMALLINT",
+            "MEDIUMINT",
+            "BIGINT",
+            "INT2",
+            "INT8",
+        ] {
             let g = sqlite_type_to_gleam(t, "glite");
             assert_eq!(g.type_name, "Int", "failed for type {t}");
             assert_eq!(g.param_fn, "glite.int");
@@ -261,5 +332,37 @@ mod tests {
 
         let g = sqlite_type_to_gleam("TEXT", "db");
         assert_eq!(g.param_fn, "db.text");
+    }
+
+    #[test]
+    fn test_tx_module_uses_glite_constructors() {
+        let options = Options {
+            module: Some("glite/tx".into()),
+            ..Default::default()
+        };
+        let driver = SqliteDriver::new(&options);
+        assert_eq!(driver.decode_import_path(), "glite/decode");
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        let col = Column {
+            not_null: false,
+            r#type: Some(crate::plugin::plugin::Identifier {
+                name: "integer".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = driver.resolve_column_type(&col, &ctx);
+        assert_eq!(
+            driver.render_param(&resolved.param_expr, "n"),
+            "glite.nullable(n, glite.int)"
+        );
+        assert_eq!(
+            driver.extra_imports("  tx.exec(conn, q, [glite.int(1)])"),
+            vec!["glite".to_string()]
+        );
+        let mut w = CodeWriter::new();
+        driver.write_many_call("q", "[]", &mut w);
+        assert_eq!(w.into_string(), "tx.query(conn, q, [], decoder)\n");
     }
 }

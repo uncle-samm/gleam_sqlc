@@ -1,4 +1,4 @@
-use crate::driver::type_map::{DecoderExpr, GleamType, ParamExpr, ResolvedType};
+use crate::driver::type_map::{GleamType, ParamExpr, ResolvedType, TypeContext};
 use crate::plugin::plugin::Column;
 use crate::utils::CodeWriter;
 
@@ -6,131 +6,131 @@ use crate::utils::CodeWriter;
 ///
 /// Each driver knows how to:
 /// - Map database column types to Gleam types, param constructors, and decoders
+/// - Render parameters in the shape its Gleam library expects
 /// - Generate the correct function calls for each query annotation
-/// - Produce the right imports for the target Gleam database library
+/// - Produce the imports and private helpers the generated module needs
 pub trait Driver {
     /// Module alias for code references (last segment of import path).
-    /// E.g., "postgleam", "glite", or "pg" (for "db/pg").
+    /// E.g., "postgleam", "glite", "pool" or "pg" (for "db/pg").
     fn module_name(&self) -> &str;
 
     /// Full import path for the main module. E.g., "postgleam" or "db/pg".
     fn import_path(&self) -> &str;
 
-    /// Full import path for the decode module. E.g., "postgleam/decode" or "db/pg/decode".
+    /// Full import path for the decode module. E.g., "postgleam/decode".
     fn decode_import_path(&self) -> &str;
 
-    /// Resolve a database column to its Gleam type, param expression, and decoder expression.
-    fn resolve_column_type(&self, col: &Column) -> ResolvedType;
+    /// Resolve a database column to its Gleam type, param expression and decoder.
+    fn resolve_column_type(&self, col: &Column, ctx: &TypeContext) -> ResolvedType;
 
-    /// Resolve a column type specifically for use as a query parameter.
-    /// Defaults to `resolve_column_type`. Override to handle cases where
-    /// param encoding differs from result decoding (e.g., array params
-    /// use postgleam.array() but array result columns fall back to text).
-    fn resolve_param_type(&self, col: &Column) -> ResolvedType {
-        self.resolve_column_type(col)
+    /// Map a Gleam type name from an override to its base type.
+    /// Override names are validated when options are parsed.
+    fn override_base(&self, type_name: &str) -> GleamType;
+
+    /// Resolve a type override to a full type.
+    fn resolve_override(&self, type_name: &str, not_null: bool) -> ResolvedType {
+        ResolvedType::from_base(self.override_base(type_name), !not_null, false, None)
     }
 
-    /// Generate imports for the query module.
-    fn write_imports(&self, needs_option: bool, needs_execrows: bool, needs_array: bool, needs_copyfrom: bool, needs_slice: bool, w: &mut CodeWriter) {
-        let needs_tag_parse = needs_execrows && self.execrows_needs_tag_parse();
-        if needs_tag_parse {
-            w.line("import gleam/int");
-        }
-        if needs_tag_parse || needs_array || needs_copyfrom || needs_slice {
-            w.line("import gleam/list");
-        }
-        if needs_option || needs_array {
-            w.line("import gleam/option.{type Option}");
-        }
-        if needs_tag_parse || needs_copyfrom {
-            w.line("import gleam/result");
-        }
-        if needs_tag_parse || needs_slice {
-            w.line("import gleam/string");
-        }
-        let import = self.import_path();
-        let decode_import = self.decode_import_path();
-        w.writef(format_args!("import {import}"));
-        w.writef(format_args!("import {decode_import}"));
+    /// Render a parameter as one element of the driver's params list.
+    /// `var` is the Gleam expression holding the value (e.g. `params.id`).
+    fn render_param(&self, expr: &ParamExpr, var: &str) -> String;
+
+    /// An expression of type `Result(Param, Error)` that must be bound before the
+    /// params list is built, or `None` when the param needs no preparation.
+    fn prepare_param(&self, _expr: &ParamExpr, _var: &str) -> Option<String> {
+        None
     }
 
-    /// Map a Gleam type name from an override to a ResolvedType.
-    /// Returns None if the type name is not recognized.
-    fn resolve_override(&self, type_name: &str, not_null: bool) -> Option<ResolvedType> {
-        let module = self.module_name();
-        let base = match type_name {
-            "String" => GleamType::simple("String", &format!("{module}.text"), "decode.text"),
-            "Int" => GleamType::simple("Int", &format!("{module}.int"), "decode.int"),
-            "Float" => GleamType::simple("Float", &format!("{module}.float"), "decode.float"),
-            "Bool" => GleamType::simple("Bool", &format!("{module}.bool"), "decode.bool"),
-            "BitArray" => GleamType::simple("BitArray", &format!("{module}.bytea"), "decode.bytea"),
-            _ => return None,
-        };
-        if not_null {
-            Some(ResolvedType {
-                type_expr: base.type_name,
-                param_expr: ParamExpr::Direct { fn_name: base.param_fn },
-                decoder_expr: DecoderExpr::Direct { fn_name: base.decoder_fn },
-            })
-        } else {
-            Some(ResolvedType {
-                type_expr: format!("Option({})", base.type_name),
-                param_expr: ParamExpr::Nullable { inner_fn: base.param_fn },
-                decoder_expr: DecoderExpr::Optional { inner_fn: base.decoder_fn },
-            })
-        }
-    }
+    /// Render a `sqlc.slice()` param as a list of params, flattened into the
+    /// params list.
+    fn render_slice_param(&self, expr: &ParamExpr, var: &str) -> String;
 
-    /// Whether :execrows needs a tag-parsing helper function.
-    /// PostgreSQL returns a command tag like "UPDATE 5" that must be parsed.
-    /// SQLite's exec() returns the affected row count directly.
-    fn execrows_needs_tag_parse(&self) -> bool;
+    /// Imports beyond the Gleam standard library, decided from the generated body.
+    fn extra_imports(&self, body: &str) -> Vec<String>;
 
-    /// Write the :execrows helper function if needed.
-    fn write_execrows_helper(&self, w: &mut CodeWriter) {
-        if !self.execrows_needs_tag_parse() {
-            return;
-        }
-        w.line("/// Parse affected row count from a PostgreSQL command tag.");
-        w.line("/// Tags look like \"UPDATE 5\", \"DELETE 2\", \"INSERT 0 1\".");
-        w.line("fn parse_affected_rows(tag: String) -> Int {");
-        w.indent();
-        w.line("tag");
-        w.indent();
-        w.line("|> string.split(\" \")");
-        w.line("|> list.last()");
-        w.line("|> result.try(int.parse)");
-        w.line("|> result.unwrap(0)");
-        w.dedent();
-        w.dedent();
-        w.line("}");
-    }
+    /// Private helper functions used by the generated body.
+    fn write_helpers(&self, body: &str, ctx: &TypeContext, w: &mut CodeWriter);
 
-    /// Write the function call for a :one query.
-    fn write_one_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
-        let m = self.module_name();
-        w.writef(format_args!(
-            "{m}.query_one(conn, {const_name}, {params_str}, decoder)"
-        ));
-    }
-
-    /// Write the function call for a :many query.
-    fn write_many_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter) {
-        let m = self.module_name();
-        w.writef(format_args!(
-            "{m}.query_with(conn, {const_name}, {params_str}, decoder)"
-        ));
-    }
-
-    /// Write the function call for a :exec query.
-    fn write_exec_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter);
-
-    /// Write the function call for a :execrows query.
-    fn write_execrows_call(&self, const_name: &str, params_str: &str, w: &mut CodeWriter);
+    fn write_one_call(&self, sql: &str, params: &str, w: &mut CodeWriter);
+    fn write_many_call(&self, sql: &str, params: &str, w: &mut CodeWriter);
+    fn write_exec_call(&self, sql: &str, params: &str, w: &mut CodeWriter);
+    fn write_execrows_call(&self, sql: &str, params: &str, w: &mut CodeWriter);
+    /// `param_sets` is a Gleam expression of type `List(List(Param))`.
+    fn write_copyfrom_call(&self, sql: &str, param_sets: &str, w: &mut CodeWriter);
 }
 
 /// Extract the last path segment from a module path for use as the Gleam alias.
 /// E.g., "postgleam" → "postgleam", "db/pg" → "pg", "my/lib/decode" → "decode".
 pub fn path_alias(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// True if `body` references `module.` as a qualified name (not as part of a
+/// longer identifier such as `my_list.`). Lines with string constants and doc
+/// comments are ignored so SQL text cannot trigger imports.
+pub fn uses_module(body: &str, module: &str) -> bool {
+    let needle = format!("{module}.");
+    code_lines(body).any(|line| contains_token(line, &needle))
+}
+
+/// True if `body` uses `name` as a bare identifier (e.g. `Some`, `None`).
+pub fn uses_name(body: &str, name: &str) -> bool {
+    code_lines(body).any(|line| {
+        let mut start = 0;
+        while let Some(pos) = line[start..].find(name) {
+            let abs = start + pos;
+            let before_ok = abs == 0 || {
+                let b = line.as_bytes()[abs - 1] as char;
+                !(b.is_ascii_alphanumeric() || b == '_' || b == '.')
+            };
+            let after = line.as_bytes().get(abs + name.len()).map(|b| *b as char);
+            let after_ok = !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '_');
+            if before_ok && after_ok {
+                return true;
+            }
+            start = abs + name.len();
+        }
+        false
+    })
+}
+
+fn code_lines(body: &str) -> impl Iterator<Item = &str> {
+    body.lines().filter(|l| {
+        let t = l.trim_start();
+        !t.starts_with("const ") && !t.starts_with("//")
+    })
+}
+
+fn contains_token(line: &str, needle: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(needle) {
+        let abs = start + pos;
+        let before_ok = abs == 0 || {
+            let b = line.as_bytes()[abs - 1] as char;
+            !(b.is_ascii_alphanumeric() || b == '_' || b == '.')
+        };
+        if before_ok {
+            return true;
+        }
+        start = abs + needle.len();
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_usage_detection() {
+        let body = "const q = \"SELECT list.x\"\n  list.map(x, f)\n  my_result.x\n";
+        assert!(uses_module(body, "list"));
+        assert!(!uses_module(body, "result"));
+        assert!(!uses_module("const q = \"list.x\"", "list"));
+        assert!(uses_name("  Some(x)", "Some"));
+        assert!(!uses_name("  option.Some(x)", "Some"));
+        assert!(!uses_name("  SomeThing(x)", "Some"));
+        assert!(uses_name("[None]", "None"));
+    }
 }

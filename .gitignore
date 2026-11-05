@@ -3,3 +3,6 @@
 /reference
 **/build
 end2end/dist/
+
+# e2e projects resolve the latest compatible driver versions
+end2end/*/manifest.toml

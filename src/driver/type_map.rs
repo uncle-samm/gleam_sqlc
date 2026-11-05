@@ -1,38 +1,44 @@
-/// Shared types for column type resolution across all drivers.
+//! Shared types for column type resolution across all drivers.
 
-/// Gleam type info for a database column.
+use std::collections::HashMap;
+
+/// Gleam type info for a database column type.
 #[derive(Debug, Clone)]
 pub struct GleamType {
-    /// The Gleam type expression, e.g. "Int", "String", "Bool"
+    /// The Gleam type expression, e.g. "Int", "String", "models.Status".
     pub type_name: String,
-    /// Param constructor function, e.g. "postgleam.int", "glite.int"
+    /// Gleam function (or function expression) building one driver value,
+    /// e.g. "value.Integer", "glite.int", "encode_status".
     pub param_fn: String,
-    /// Decoder function, e.g. "decode.int", "decode.text"
+    /// Decoder expression, e.g. "decode.int".
     pub decoder_fn: String,
-    /// Arity of the param constructor (1 = normal, 2+ = tuple destructure needed)
+    /// Arity of the param constructor (1 = normal, 2+ = tuple destructure needed).
     pub param_arity: u8,
+    /// UUID kept as a String in Gleam: must be parsed before it can be sent.
+    pub uuid_string: bool,
 }
 
 impl GleamType {
     pub fn simple(type_name: &str, param_fn: &str, decoder_fn: &str) -> Self {
-        Self {
-            type_name: type_name.into(),
-            param_fn: param_fn.into(),
-            decoder_fn: decoder_fn.into(),
-            param_arity: 1,
-        }
+        Self::multi(type_name, param_fn, decoder_fn, 1)
     }
 
     pub fn multi(type_name: &str, param_fn: &str, decoder_fn: &str, arity: u8) -> Self {
+        assert!(
+            (1..=4).contains(&arity),
+            "param arity must be 1..=4, got {arity}"
+        );
         Self {
             type_name: type_name.into(),
             param_fn: param_fn.into(),
             decoder_fn: decoder_fn.into(),
             param_arity: arity,
+            uuid_string: false,
         }
     }
 }
 
+/// A fully resolved column or parameter type.
 #[derive(Debug, Clone)]
 pub struct ResolvedType {
     pub type_expr: String,
@@ -40,91 +46,149 @@ pub struct ResolvedType {
     pub decoder_expr: DecoderExpr,
 }
 
-#[derive(Debug, Clone)]
-pub enum ParamExpr {
-    /// Simple: fn_name(var)
-    Direct { fn_name: String },
-    /// Nullable: module.nullable(var, inner_fn)
-    Nullable { inner_fn: String },
-    /// Destructure 2-tuple: case var { #(a, b) -> fn_name(a, b) }
-    Destruct2 { fn_name: String },
-    /// Destructure 3-tuple: case var { #(a, b, c) -> fn_name(a, b, c) }
-    Destruct3 { fn_name: String },
-    /// Destructure 4-tuple: case var { #(a, b, c, d) -> fn_name(a, b, c, d) }
-    Destruct4 { fn_name: String },
-    /// Nullable with tuple destructuring
-    NullableDestruct {
-        fn_name: String,
-        arity: u8,
-    },
-    /// Array encoding
-    Array { inner_fn: String, nullable: bool },
-}
+impl ResolvedType {
+    /// Build a resolved type from a base type, wrapping it for nullability / arrays.
+    pub fn from_base(
+        base: GleamType,
+        nullable: bool,
+        array: bool,
+        array_decoder: Option<String>,
+    ) -> Self {
+        let elem_type = base.type_name.clone();
+        let type_inner = if array {
+            format!("List({elem_type})")
+        } else {
+            elem_type
+        };
+        let type_expr = if nullable {
+            format!("Option({type_inner})")
+        } else {
+            type_inner
+        };
 
-#[derive(Debug, Clone)]
-pub enum DecoderExpr {
-    Direct { fn_name: String },
-    Optional { inner_fn: String },
-    Array { inner_fn: String, nullable: bool },
-}
+        let param_expr = if base.uuid_string {
+            ParamExpr::UuidString { nullable, array }
+        } else if array {
+            ParamExpr::Array {
+                elem_fn: base.param_fn.clone(),
+                arity: base.param_arity,
+                nullable,
+            }
+        } else {
+            ParamExpr::Value {
+                fn_name: base.param_fn.clone(),
+                arity: base.param_arity,
+                nullable,
+            }
+        };
 
-impl ParamExpr {
-    /// Generate the Gleam expression to encode a parameter value.
-    /// For PostgreSQL (postgleam), params are `List(Option(Value))` so all
-    /// expressions are wrapped in `Some(...)`.
-    pub fn to_gleam(&self, var_name: &str, module_name: &str) -> String {
-        match self {
-            ParamExpr::Direct { fn_name } => format!("Some({fn_name}({var_name}))"),
-            ParamExpr::Nullable { inner_fn } => {
-                // Option(a) → Some(inner(val)) when Some, None when None
-                format!("case {var_name} {{ option.Some(v) -> Some({inner_fn}(v))  option.None -> None }}")
+        let decoder_inner = match array_decoder {
+            Some(d) if array => d,
+            _ => base.decoder_fn,
+        };
+        let decoder_expr = if nullable {
+            DecoderExpr::Optional {
+                inner: decoder_inner,
             }
-            ParamExpr::Destruct2 { fn_name } => {
-                format!("Some(case {var_name} {{ #(a, b) -> {fn_name}(a, b) }})")
+        } else {
+            DecoderExpr::Direct {
+                expr: decoder_inner,
             }
-            ParamExpr::Destruct3 { fn_name } => {
-                format!("Some(case {var_name} {{ #(a, b, c) -> {fn_name}(a, b, c) }})")
-            }
-            ParamExpr::Destruct4 { fn_name } => {
-                format!("Some(case {var_name} {{ #(a, b, c, d) -> {fn_name}(a, b, c, d) }})")
-            }
-            ParamExpr::NullableDestruct { fn_name, arity } => {
-                let (pattern, args) = match arity {
-                    2 => ("#(a, b)", "a, b"),
-                    3 => ("#(a, b, c)", "a, b, c"),
-                    4 => ("#(a, b, c, d)", "a, b, c, d"),
-                    _ => ("#(a, b)", "a, b"),
-                };
-                format!(
-                    "case {var_name} {{ option.Some(v) -> Some(case v {{ {pattern} -> {fn_name}({args}) }})  option.None -> None }}"
-                )
-            }
-            ParamExpr::Array { inner_fn, nullable } => {
-                if *nullable {
-                    format!(
-                        "case {var_name} {{ option.Some(arr) -> Some(value.Array(list.map(arr, fn(v) {{ Some({inner_fn}(v)) }})))  option.None -> None }}"
-                    )
-                } else {
-                    format!("Some(value.Array(list.map({var_name}, fn(v) {{ Some({inner_fn}(v)) }})))")
-                }
-            }
+        };
+
+        Self {
+            type_expr,
+            param_expr,
+            decoder_expr,
         }
     }
+}
+
+/// How a Gleam value becomes a query parameter. Rendering is driver specific
+/// (see `Driver::render_param`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamExpr {
+    /// A single value built with `fn_name`. Arity > 1 means the Gleam value is a
+    /// tuple that is destructured into the constructor's arguments.
+    Value {
+        fn_name: String,
+        arity: u8,
+        nullable: bool,
+    },
+    /// A list of values encoded as a PostgreSQL array.
+    Array {
+        elem_fn: String,
+        arity: u8,
+        nullable: bool,
+    },
+    /// A UUID held as a String: parsed before the query runs, failing with
+    /// an EncodeError instead of silently sending NULL or bad bytes.
+    UuidString { nullable: bool, array: bool },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecoderExpr {
+    Direct { expr: String },
+    Optional { inner: String },
 }
 
 impl DecoderExpr {
     /// Generate the Gleam expression for a column decoder.
     pub fn to_gleam(&self) -> String {
         match self {
-            DecoderExpr::Direct { fn_name } => fn_name.clone(),
-            DecoderExpr::Optional { inner_fn } => format!("decode.optional({inner_fn})"),
-            DecoderExpr::Array { inner_fn, nullable } => {
-                if *nullable {
-                    format!("decode.optional(decode.array({inner_fn}))")
-                } else {
-                    format!("decode.array({inner_fn})")
-                }
-            }
+            DecoderExpr::Direct { expr } => expr.clone(),
+            DecoderExpr::Optional { inner } => format!("decode.optional({inner})"),
+        }
+    }
+}
+
+/// Destructuring pattern and argument list for a tuple of the given arity.
+pub fn tuple_pattern(arity: u8) -> (&'static str, &'static str) {
+    match arity {
+        2 => ("#(a, b)", "a, b"),
+        3 => ("#(a, b, c)", "a, b, c"),
+        4 => ("#(a, b, c, d)", "a, b, c, d"),
+        other => unreachable!("tuple_pattern called with arity {other}"),
+    }
+}
+
+/// A Gleam expression of type `fn(a) -> Value` for a constructor of the given arity.
+pub fn value_fn(fn_name: &str, arity: u8) -> String {
+    if arity <= 1 {
+        fn_name.to_string()
+    } else {
+        let (pattern, args) = tuple_pattern(arity);
+        format!("fn(t) {{ case t {{ {pattern} -> {fn_name}({args}) }} }}")
+    }
+}
+
+/// A PostgreSQL enum known from the catalog.
+#[derive(Debug, Clone)]
+pub struct EnumInfo {
+    /// Gleam type name, e.g. "Status".
+    pub type_name: String,
+    /// snake_case base used for helpers, e.g. "status".
+    pub snake: String,
+}
+
+/// Lookup from catalog enum name ("status" or "schema.status") to its Gleam info.
+pub type EnumMap = HashMap<String, EnumInfo>;
+
+/// Context for resolving column types in a particular output module.
+pub struct TypeContext<'a> {
+    pub enums: &'a EnumMap,
+    /// How enum types are referenced from the module being generated:
+    /// `Some("")` inside models.gleam, `Some("models.")` in a query module,
+    /// `None` when enum types are unavailable (enums become String).
+    pub enum_qualifier: Option<String>,
+}
+
+impl<'a> TypeContext<'a> {
+    #[cfg(test)]
+    pub fn without_enums(enums: &'a EnumMap) -> Self {
+        Self {
+            enums,
+            enum_qualifier: None,
         }
     }
 }

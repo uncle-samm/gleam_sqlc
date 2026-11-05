@@ -12,6 +12,7 @@ import gleeunit/should
 import postgleam
 import postgleam/config
 import postgleam/error
+import generated/models
 import generated/query
 
 pub fn main() {
@@ -765,7 +766,7 @@ pub fn test_special_types_test() {
   should.be_true(option.is_some(row.c_json))
   should.be_true(option.is_some(row.c_jsonb))
   should.equal(row.c_uuid, Some(uuid_bytes))
-  should.equal(row.c_enum, Some("small"))
+  should.equal(row.c_enum, Some(models.Small))
   should.equal(row.c_xml, Some("<root>hello</root>"))
   should.equal(row.c_xml_string_override, Some("<root>override</root>"))
   should.be_true(option.is_some(row.c_jsonpath))
@@ -820,7 +821,7 @@ pub fn test_enum_types_small_test() {
   |> should.be_ok()
 
   let row = query.get_postgres_special_types(conn) |> should.be_ok()
-  should.equal(row.c_enum, Some("small"))
+  should.equal(row.c_enum, Some(models.Small))
 
   query.truncate_postgres_special_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -837,7 +838,7 @@ pub fn test_enum_types_medium_test() {
   |> should.be_ok()
 
   let row = query.get_postgres_special_types(conn) |> should.be_ok()
-  should.equal(row.c_enum, Some("medium"))
+  should.equal(row.c_enum, Some(models.Medium))
 
   query.truncate_postgres_special_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -854,7 +855,7 @@ pub fn test_enum_types_big_test() {
   |> should.be_ok()
 
   let row = query.get_postgres_special_types(conn) |> should.be_ok()
-  should.equal(row.c_enum, Some("big"))
+  should.equal(row.c_enum, Some(models.Big))
 
   query.truncate_postgres_special_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -1030,7 +1031,7 @@ pub fn test_not_null_types_test() {
   |> should.be_ok()
 
   let row = query.get_postgres_not_null_types(conn) |> should.be_ok()
-  should.equal(row.c_enum_not_null, "small")
+  should.equal(row.c_enum_not_null, models.Small)
 
   query.truncate_postgres_not_null_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -1096,10 +1097,8 @@ pub fn test_array_types_bytea_test() {
   postgleam.disconnect(conn)
 }
 
-// Array column test: insert via generated function, verify via count query.
-// Note: array result columns use text fallback since PostGleam doesn't have
-// decode.array yet. The get_postgres_array_types query can't decode array
-// columns in binary mode.
+// Array column test: insert via generated function, read back through the
+// generated array decoder.
 pub fn test_array_types_insert_test() {
   let conn = connect()
   query.truncate_postgres_array_types(conn) |> should.be_ok()
@@ -1118,14 +1117,11 @@ pub fn test_array_types_insert_test() {
   )
   |> should.be_ok()
 
-  // Verify via simple_query since array result columns can't be decoded yet
-  let result =
-    postgleam.simple_query(
-      conn,
-      "SELECT count(*) FROM postgres_array_types",
-    )
-    |> should.be_ok()
-  should.be_true(result != [])
+  let row = query.get_postgres_array_types(conn) |> should.be_ok()
+  should.equal(row.c_boolean_array, Some([True, False]))
+  should.equal(row.c_text_array, Some(["hello", "world"]))
+  should.equal(row.c_integer_array, Some([1, 2, 3]))
+  should.equal(row.c_decimal_array, None)
 
   query.truncate_postgres_array_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -1524,7 +1520,7 @@ pub fn test_json_copy_from_test() {
 
   let row = query.get_postgres_special_types_cnt(conn) |> should.be_ok()
   should.equal(row.cnt, 1)
-  should.be_true(string.contains(row.c_json, "test"))
+  should.be_true(string.contains(option.unwrap(row.c_json, ""), "test"))
 
   query.truncate_postgres_special_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -1608,4 +1604,73 @@ fn float_abs(x: Float) -> Float {
     True -> 0.0 -. x
     False -> x
   }
+}
+
+// ============================================================
+// Error handling and generated helpers
+// ============================================================
+
+// :one returns postgleam's own error, never a string.
+pub fn one_no_rows_is_decode_error_test() {
+  let conn = connect()
+  cleanup(conn)
+  case query.get_author(conn, "nobody") {
+    Error(error.DecodeError(_)) -> Nil
+    other -> panic as { "expected DecodeError, got " <> string.inspect(other) }
+  }
+  postgleam.disconnect(conn)
+}
+
+pub fn one_database_error_is_kept_test() {
+  let conn = connect()
+  cleanup(conn)
+  let params = query.CreateAuthorParams(id: 7, name: "Dup", bio: None)
+  query.create_author(conn, params) |> should.be_ok()
+  case query.create_author(conn, params) {
+    Error(error.PgError(fields:, ..)) -> should.equal(fields.code, "23505")
+    other -> panic as { "expected PgError, got " <> string.inspect(other) }
+  }
+  cleanup(conn)
+  postgleam.disconnect(conn)
+}
+
+// Enum params are sent from the generated enum type and decoded back into it.
+pub fn enum_param_round_trip_test() {
+  let conn = connect()
+  query.truncate_postgres_not_null_types(conn) |> should.be_ok()
+  query.insert_postgres_not_null_types(conn, models.Big) |> should.be_ok()
+  let row = query.get_postgres_not_null_types(conn) |> should.be_ok()
+  should.equal(row.c_enum_not_null, models.Big)
+  should.equal(models.c_enum_to_string(row.c_enum_not_null), "big")
+  should.equal(models.c_enum_from_string("medium"), Ok(models.Medium))
+  should.equal(models.c_enum_from_string("huge"), Error(Nil))
+  query.truncate_postgres_not_null_types(conn) |> should.be_ok()
+  postgleam.disconnect(conn)
+}
+
+// :copyfrom is one pipelined batch: it returns the row count, and a bad row
+// rolls back the whole batch.
+pub fn copyfrom_is_atomic_test() {
+  let conn = connect()
+  query.truncate_postgres_string_types(conn) |> should.be_ok()
+  let row = fn(c) {
+    query.InsertPostgresStringTypesBatchParams(
+      c_char: Some(c),
+      c_varchar: None,
+      c_character_varying: None,
+      c_bpchar: None,
+      c_text: None,
+    )
+  }
+  query.insert_postgres_string_types_batch(conn, [row("a"), row("b")])
+  |> should.equal(Ok(2))
+  // CHAR(1) rejects "too long", so neither row of this batch may be kept.
+  query.insert_postgres_string_types_batch(conn, [row("c"), row("too long")])
+  |> should.be_error()
+  let rows =
+    postgleam.simple_query(conn, "SELECT count(*) FROM postgres_string_types")
+    |> should.be_ok()
+  should.be_true(string.contains(string.inspect(rows), "\"2\""))
+  query.truncate_postgres_string_types(conn) |> should.be_ok()
+  postgleam.disconnect(conn)
 }
