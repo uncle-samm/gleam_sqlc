@@ -26,9 +26,6 @@ pub fn generate(request: GenerateRequest) -> Result<GenerateResponse, String> {
     let driver: Box<dyn Driver> = match engine {
         "postgresql" => Box::new(PostgresDriver::new(&options)),
         "sqlite" => {
-            if options.query_timeout.is_some() {
-                return Err("queryTimeout is only supported for the postgresql engine".into());
-            }
             if options.uuid_as_string {
                 return Err("uuidAsString is only supported for the postgresql engine".into());
             }

@@ -2,7 +2,7 @@
 
 A [sqlc](https://sqlc.dev) WASM plugin that generates type-safe [Gleam](https://gleam.run) code from SQL.
 
-- **PostgreSQL** via [postgleam](https://hex.pm/packages/postgleam) (0.8 or later; enum parameters on a plain connection need the next postgleam release)
+- **PostgreSQL** via [postgleam](https://hex.pm/packages/postgleam) (0.9 or later)
 - **SQLite** via [glite](https://hex.pm/packages/glite) (0.4 or later)
 
 You write SQL, sqlc checks it against your schema, and this plugin generates Gleam
@@ -217,7 +217,6 @@ codegen:
     out: "src/db"
     options:
       module: "postgleam/pool"
-      queryTimeout: 5000
       uuidAsString: true
       overrides:
         - column: "GetAuthor:bio"
@@ -233,24 +232,23 @@ error, so a typo cannot silently change the output.
 |--------|---------|-------------|
 | `module` | `postgleam` / `glite` | Module whose query functions are called. The last path segment is the alias used in code. |
 | `decodeModule` | `{module}/decode` | Decode module import. Its last segment must be `decode`. |
-| `queryTimeout` | none (`5000` for `postgleam/pool`) | Timeout in ms appended to every call, for APIs that take one. `0` means never pass a timeout. PostgreSQL only. |
 | `uuidAsString` | `false` | Map `uuid` to `String` instead of `BitArray`. Params are parsed before the query runs; an invalid UUID returns `EncodeError`. PostgreSQL only. |
 | `modelsModule` | derived from `out` | Gleam module path of `models.gleam`, needed for enum types when `out` is not under `src/`. |
 | `skipModels` | `false` | Don't generate `models.gleam`. Enum columns are then typed as `String`. |
 | `overrides` | `[]` | Override a column's type: `QueryName:column` or `*:column`, with `type` one of `String`, `Int`, `Float`, `Bool`, `BitArray`. |
+
+`postgleamVersion` and `queryTimeout` are deprecated: they are still accepted, print a
+warning and have no effect. With postgleam 0.9, set timeouts on the connection or pool config.
 
 ### Targets
 
 | Target | Options | `conn` is |
 |--------|---------|-----------|
 | postgleam connection (default) | none | `postgleam.Connection` |
-| postgleam pool | `module: "postgleam/pool"` | the pool handle; calls get a timeout (default 5000 ms) |
+| postgleam pool | `module: "postgleam/pool"` | `pool.Pool` (timeouts come from the pool config) |
 | glite connection (default) | none | `glite.Connection` |
 | glite transaction | `module: "glite/tx"`, `skipModels: true` | the `Tx` passed to `glite.transaction` |
-| Your own wrapper | `module: "app/db"` (plus `queryTimeout` if its functions take one) | whatever your wrapper takes |
-
-With `postgleam/pool`, `:copyfrom` sends rows one by one (the pool has no batch
-call), so it is not atomic there.
+| Your own wrapper | `module: "app/db"` | whatever your wrapper takes; it needs `query`, `query_with`, `query_one` and `query_batch` with postgleam's signatures |
 
 To use the same queries both inside and outside glite transactions, add a second
 codegen entry with `module: "glite/tx"`, `skipModels: true` and a different `out`

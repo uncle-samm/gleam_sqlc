@@ -3,7 +3,7 @@ plugins:
   - name: gleam
     wasm:
       url: file://../../target/wasm32-wasip1/release/sqlc-gen-gleam.wasm
-      sha256: "1df91c0fd9fe345a7cf562c999922ce30d12ce7d07e9fafc7bd57243690439cb"
+      sha256: "e30a336ca70310190507f0d80bd86d75318600c75a3c40452b86091514e20240"
 sql:
   - schema: "schema.sql"
     queries: "query.sql"

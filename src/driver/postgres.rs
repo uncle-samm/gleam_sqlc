@@ -8,10 +8,9 @@ use crate::utils::CodeWriter;
 
 /// Generates code for [postgleam](https://hex.pm/packages/postgleam).
 ///
-/// Two call styles are supported:
-/// - a plain `postgleam.Connection` (default): `postgleam.query_with(conn, sql, params, decoder)`
-/// - an API that takes a timeout, such as `postgleam/pool`:
-///   `pool.query_with(pool, sql, params, decoder, timeout)`
+/// Calls look like `postgleam.query_with(conn, sql, params, decoder)`. The
+/// `module` option swaps `postgleam` for any module with the same functions,
+/// such as `postgleam/pool` or a wrapper of your own.
 pub struct PostgresDriver {
     /// Full import path, e.g., "postgleam/pool" or "db/pg"
     import: String,
@@ -21,8 +20,6 @@ pub struct PostgresDriver {
     decode_import: String,
     /// Map uuid → String instead of BitArray
     uuid_as_string: bool,
-    /// Timeout argument appended to every call, if the target API takes one.
-    timeout: Option<i64>,
 }
 
 impl PostgresDriver {
@@ -39,20 +36,11 @@ impl PostgresDriver {
                 format!("{import}/decode")
             }
         });
-        let timeout = options.effective_timeout(&import);
         Self {
             import,
             alias,
             decode_import,
             uuid_as_string: options.uuid_as_string,
-            timeout,
-        }
-    }
-
-    fn timeout_arg(&self) -> String {
-        match self.timeout {
-            Some(t) => format!(", {t}"),
-            None => String::new(),
         }
     }
 }
@@ -211,15 +199,6 @@ impl Driver for PostgresDriver {
             }
             wrote = true;
         };
-        if body.contains("first_row(") {
-            sep(w);
-            w.line("fn first_row(rows: List(a)) -> Result(a, error.Error) {");
-            w.line("  case rows {");
-            w.line("    [first, ..] -> Ok(first)");
-            w.line("    [] -> Error(error.DecodeError(\"expected one row, got none\"))");
-            w.line("  }");
-            w.line("}");
-        }
         if body.contains("affected_rows(") {
             sep(w);
             w.line("/// Parse the affected row count from a PostgreSQL command tag such as");
@@ -288,63 +267,36 @@ impl Driver for PostgresDriver {
 
     fn write_one_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
         let m = self.module_name();
-        match self.timeout {
-            None => w.writef(format_args!(
-                "{m}.query_one(conn, {sql}, {params}, decoder)"
-            )),
-            Some(t) => {
-                w.writef(format_args!(
-                    "case {m}.query_with(conn, {sql}, {params}, decoder, {t}) {{"
-                ));
-                w.line("  Ok(response) -> first_row(response.rows)");
-                w.line("  Error(e) -> Error(e)");
-                w.line("}");
-            }
-        }
+        w.writef(format_args!(
+            "{m}.query_one(conn, {sql}, {params}, decoder)"
+        ));
     }
 
     fn write_many_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
         let m = self.module_name();
-        let t = self.timeout_arg();
         w.writef(format_args!(
-            "{m}.query_with(conn, {sql}, {params}, decoder{t})"
+            "{m}.query_with(conn, {sql}, {params}, decoder)"
         ));
     }
 
     fn write_exec_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
         let m = self.module_name();
-        let t = self.timeout_arg();
-        w.writef(format_args!("{m}.query(conn, {sql}, {params}{t})"));
+        w.writef(format_args!("{m}.query(conn, {sql}, {params})"));
         w.line("|> result.replace(Nil)");
     }
 
     fn write_execrows_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
         let m = self.module_name();
-        let t = self.timeout_arg();
-        w.writef(format_args!("{m}.query(conn, {sql}, {params}{t})"));
+        w.writef(format_args!("{m}.query(conn, {sql}, {params})"));
         w.line("|> result.try(fn(r) { affected_rows(r.tag) })");
     }
 
     fn write_copyfrom_call(&self, sql: &str, param_sets: &str, w: &mut CodeWriter) {
         let m = self.module_name();
-        match self.timeout {
-            // One pipeline, one Sync: PostgreSQL runs it as a single implicit
-            // transaction, so either every row is inserted or none is.
-            None => {
-                w.writef(format_args!("{m}.query_batch(conn, {sql}, {param_sets})"));
-                w.line("|> result.map(list.length)");
-            }
-            // Timeout-style APIs (e.g. postgleam/pool) have no batch call.
-            // Rows are sent one by one and are NOT atomic.
-            Some(t) => {
-                w.writef(format_args!(
-                    "list.try_fold({param_sets}, 0, fn(count, row_params) {{"
-                ));
-                w.writef(format_args!("  {m}.query(conn, {sql}, row_params, {t})"));
-                w.line("  |> result.replace(count + 1)");
-                w.line("})");
-            }
-        }
+        // One pipeline, one Sync: PostgreSQL runs it as a single implicit
+        // transaction, so either every row is inserted or none is.
+        w.writef(format_args!("{m}.query_batch(conn, {sql}, {param_sets})"));
+        w.line("|> result.map(list.length)");
     }
 }
 
@@ -782,17 +734,16 @@ mod tests {
         assert_eq!(driver.decode_import_path(), "postgleam/decode");
         let mut w = CodeWriter::new();
         driver.write_many_call("q", "[]", &mut w);
+        driver.write_one_call("q", "[]", &mut w);
+        driver.write_copyfrom_call("q", "sets", &mut w);
         assert_eq!(
             w.into_string(),
-            "pool.query_with(conn, q, [], decoder, 5000)\n"
+            "pool.query_with(conn, q, [], decoder)\npool.query_one(conn, q, [], decoder)\npool.query_batch(conn, q, sets)\n|> result.map(list.length)\n"
         );
-        let mut w = CodeWriter::new();
-        driver.write_one_call("q", "[]", &mut w);
-        assert!(w.into_string().contains("first_row(response.rows)"));
     }
 
     #[test]
-    fn test_default_calls_have_no_timeout() {
+    fn test_default_calls() {
         let driver = PostgresDriver::new(&Options::default());
         let mut w = CodeWriter::new();
         driver.write_one_call("q", "[]", &mut w);

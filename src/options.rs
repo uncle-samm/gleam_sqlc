@@ -44,10 +44,8 @@ pub struct Options {
     #[serde(default)]
     pub uuid_as_string: bool,
 
-    /// Query timeout in milliseconds, passed as the last argument of every call.
-    /// Needed for APIs that take a timeout, such as `postgleam/pool`.
-    /// Default: 5000 when module is "postgleam/pool", otherwise no timeout
-    /// argument. Set to 0 to never pass one.
+    /// Deprecated and unused. postgleam 0.9 pools take their timeouts from
+    /// the pool config. Accepted so existing configs keep working.
     #[serde(default)]
     pub query_timeout: Option<i64>,
 }
@@ -82,15 +80,15 @@ impl Options {
         if options.postgleam_version.is_some() {
             eprintln!("warning: the postgleamVersion option is deprecated and has no effect");
         }
+        if options.query_timeout.is_some() {
+            eprintln!(
+                "warning: the queryTimeout option is deprecated and has no effect; set timeouts on the postgleam pool config instead"
+            );
+        }
         Ok(options)
     }
 
     fn validate(&self) -> Result<(), String> {
-        if let Some(t) = self.query_timeout
-            && t < 0
-        {
-            return Err(format!("queryTimeout must be >= 0, got {t}"));
-        }
         for path in [&self.module, &self.decode_module, &self.models_module]
             .into_iter()
             .flatten()
@@ -126,16 +124,6 @@ impl Options {
         }
         Ok(())
     }
-
-    /// Effective query timeout for the given module import path.
-    pub fn effective_timeout(&self, import_path: &str) -> Option<i64> {
-        match self.query_timeout {
-            Some(0) => None,
-            Some(t) => Some(t),
-            None if import_path == "postgleam/pool" => Some(5000),
-            None => None,
-        }
-    }
 }
 
 fn is_valid_module_path(path: &str) -> bool {
@@ -157,8 +145,6 @@ mod tests {
     fn empty_options_are_default() {
         let o = Options::parse(b"").unwrap();
         assert!(o.module.is_none());
-        assert_eq!(o.effective_timeout("postgleam"), None);
-        assert_eq!(o.effective_timeout("postgleam/pool"), Some(5000));
     }
 
     #[test]
@@ -173,12 +159,9 @@ mod tests {
     }
 
     #[test]
-    fn timeout_zero_means_none() {
-        let o = Options::parse(br#"{"module": "postgleam/pool", "queryTimeout": 0}"#).unwrap();
-        assert_eq!(o.effective_timeout("postgleam/pool"), None);
-        let o = Options::parse(br#"{"queryTimeout": 250}"#).unwrap();
-        assert_eq!(o.effective_timeout("postgleam"), Some(250));
-        assert!(Options::parse(br#"{"queryTimeout": -1}"#).is_err());
+    fn deprecated_query_timeout_is_accepted() {
+        let o = Options::parse(br#"{"module": "postgleam/pool", "queryTimeout": 5000}"#).unwrap();
+        assert_eq!(o.query_timeout, Some(5000));
     }
 
     #[test]
