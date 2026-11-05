@@ -9,6 +9,10 @@ You write SQL, sqlc checks it against your schema, and this plugin generates Gle
 row types, parameter types and query functions that return the driver's own
 `Result` types.
 
+> **A personal project.** I built this mainly for my own use and share it in case it helps
+> you too. There are no promises about support, response times or a roadmap. Issues and
+> pull requests are welcome, and so is forking it to make it your own.
+
 ## Quick start
 
 ### 1. Configure sqlc
