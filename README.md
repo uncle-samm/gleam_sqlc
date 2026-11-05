@@ -2,7 +2,7 @@
 
 A [sqlc](https://sqlc.dev) WASM plugin that generates type-safe [Gleam](https://gleam.run) code from SQL.
 
-- **PostgreSQL** via [postgleam](https://hex.pm/packages/postgleam) (0.9 or later)
+- **PostgreSQL** via [postgleam](https://hex.pm/packages/postgleam) (0.9.1 or later)
 - **SQLite** via [glite](https://hex.pm/packages/glite) (0.4 or later)
 
 You write SQL, sqlc checks it against your schema, and this plugin generates Gleam
