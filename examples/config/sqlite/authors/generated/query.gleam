@@ -94,14 +94,14 @@ pub type GetAuthorByNamePatternRow {
   GetAuthorByNamePatternRow(id: Int, name: String, bio: Option(String))
 }
 
-pub fn get_author_by_name_pattern(conn, name: Option(String)) {
+pub fn get_author_by_name_pattern(conn, name_pattern: Option(String)) {
   let decoder = {
     use c0 <- decode.element(0, decode.int)
     use c1 <- decode.element(1, decode.text)
     use c2 <- decode.element(2, decode.optional(decode.text))
     decode.success(GetAuthorByNamePatternRow(id: c0, name: c1, bio: c2))
   }
-  glite.query(conn, get_author_by_name_pattern_sql, [glite.nullable(name, glite.text)], decoder)
+  glite.query(conn, get_author_by_name_pattern_sql, [glite.nullable(name_pattern, glite.text)], decoder)
 }
 
 const update_authors_sql = "UPDATE authors\nSET bio = ?\nWHERE bio IS NOT NULL"
@@ -180,15 +180,15 @@ pub type GetAuthorsByIdsRow {
   GetAuthorsByIdsRow(id: Int, name: String, bio: Option(String))
 }
 
-pub fn get_authors_by_ids(conn, id: List(Int)) {
-  let sql = string.replace(get_authors_by_ids_sql, "/*SLICE:ids*/?", string.join(list.repeat("?", list.length(id)), ", "))
+pub fn get_authors_by_ids(conn, ids: List(Int)) {
+  let sql = string.replace(get_authors_by_ids_sql, "/*SLICE:ids*/?", string.join(list.repeat("?", list.length(ids)), ", "))
   let decoder = {
     use c0 <- decode.element(0, decode.int)
     use c1 <- decode.element(1, decode.text)
     use c2 <- decode.element(2, decode.optional(decode.text))
     decode.success(GetAuthorsByIdsRow(id: c0, name: c1, bio: c2))
   }
-  glite.query(conn, sql, list.flatten([list.map(id, glite.int)]), decoder)
+  glite.query(conn, sql, list.flatten([list.map(ids, glite.int)]), decoder)
 }
 
 const get_authors_by_ids_and_names_sql = "SELECT id, name, bio FROM authors\nWHERE id IN (/*SLICE:ids*/?) AND name IN (/*SLICE:names*/?)"
@@ -198,19 +198,19 @@ pub type GetAuthorsByIdsAndNamesRow {
 }
 
 pub type GetAuthorsByIdsAndNamesParams {
-  GetAuthorsByIdsAndNamesParams(id: List(Int), name: List(String))
+  GetAuthorsByIdsAndNamesParams(ids: List(Int), names: List(String))
 }
 
 pub fn get_authors_by_ids_and_names(conn, params: GetAuthorsByIdsAndNamesParams) {
-  let sql = string.replace(get_authors_by_ids_and_names_sql, "/*SLICE:ids*/?", string.join(list.repeat("?", list.length(params.id)), ", "))
-  let sql = string.replace(sql, "/*SLICE:names*/?", string.join(list.repeat("?", list.length(params.name)), ", "))
+  let sql = string.replace(get_authors_by_ids_and_names_sql, "/*SLICE:ids*/?", string.join(list.repeat("?", list.length(params.ids)), ", "))
+  let sql = string.replace(sql, "/*SLICE:names*/?", string.join(list.repeat("?", list.length(params.names)), ", "))
   let decoder = {
     use c0 <- decode.element(0, decode.int)
     use c1 <- decode.element(1, decode.text)
     use c2 <- decode.element(2, decode.optional(decode.text))
     decode.success(GetAuthorsByIdsAndNamesRow(id: c0, name: c1, bio: c2))
   }
-  glite.query(conn, sql, list.flatten([list.map(params.id, glite.int), list.map(params.name, glite.text)]), decoder)
+  glite.query(conn, sql, list.flatten([list.map(params.ids, glite.int), list.map(params.names, glite.text)]), decoder)
 }
 
 const delete_all_authors_sql = "DELETE FROM authors"

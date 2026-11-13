@@ -3,7 +3,7 @@ plugins:
   - name: gleam
     wasm:
       url: file://../target/wasm32-wasip1/release/sqlc-gen-gleam.wasm
-      sha256: "e30a336ca70310190507f0d80bd86d75318600c75a3c40452b86091514e20240"
+      sha256: "6780538c2367f572bf7ee89f8a3015a28220976a19f36441d2ee619fd3e2d12c"
 sql:
   - schema:
       - "../examples/config/postgresql/authors/schema.sql"
@@ -17,10 +17,36 @@ sql:
         out: "gleam_test_project/src/generated"
         options:
           overrides:
+            # sqlc cannot type max(): name the column's real type.
+            - column: "GetPostgresFunctions:max_integer"
+              dbType:
+                type: "integer"
+            - column: "GetPostgresFunctions:max_varchar"
+              dbType:
+                type: "varchar"
             - column: "GetPostgresFunctions:max_timestamp"
-              gleamType:
-                type: "Int"
+              dbType:
+                type: "timestamp"
                 notNull: true
+            # sum() of a numeric column is a numeric, not the bigint sqlc says.
+            - column: "GetPostgresInferredAggregates:sum_amount"
+              dbType:
+                type: "numeric"
+            - column: "GetPostgresInferredAggregates:max_seen_at"
+              dbType:
+                type: "timestamptz"
+            - column: "GetPostgresInferredAggregates:ids"
+              dbType:
+                type: "bigint"
+                array: true
+      # The same queries with arrays that may hold NULLs, and the c_positive
+      # domain declared as the integer it is.
+      - plugin: gleam
+        out: "gleam_test_project/src/generated/nullable_arrays"
+        options:
+          nullableArrayElements: true
+          typeAliases:
+            c_positive: "integer"
   - schema:
       - "../examples/config/sqlite/authors/schema.sql"
       - "../examples/config/sqlite/types/schema.sql"

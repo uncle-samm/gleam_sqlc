@@ -1,5 +1,6 @@
-use crate::driver::type_map::{GleamType, ParamExpr, ResolvedType, TypeContext};
-use crate::plugin::plugin::Column;
+use crate::driver::type_map::{GleamType, ParamExpr, ResolvedType, Shape, TypeContext};
+use crate::options::TypeOverride;
+use crate::plugin::plugin::{Column, Identifier};
 use crate::utils::CodeWriter;
 
 /// Abstraction over database-specific code generation.
@@ -27,9 +28,36 @@ pub trait Driver {
     /// Override names are validated when options are parsed.
     fn override_base(&self, type_name: &str) -> GleamType;
 
-    /// Resolve a type override to a full type.
-    fn resolve_override(&self, type_name: &str, not_null: bool) -> ResolvedType {
-        ResolvedType::from_base(self.override_base(type_name), !not_null, false, None)
+    /// True if the driver maps this database type itself, rather than falling
+    /// back to String with a warning.
+    fn knows_type(&self, type_name: &str, ctx: &TypeContext) -> bool;
+
+    /// Resolve a type override to a full type. `Options::parse` made sure
+    /// exactly one of `gleamType` and `dbType` is set.
+    fn resolve_override(&self, o: &TypeOverride, ctx: &TypeContext) -> ResolvedType {
+        match (&o.gleam_type, &o.db_type) {
+            (Some(g), _) => ResolvedType::from_base(
+                self.override_base(&g.type_name),
+                Shape::scalar(!g.not_null),
+                None,
+            ),
+            (None, Some(d)) => self.resolve_column_type(
+                &Column {
+                    not_null: d.not_null,
+                    is_array: d.array,
+                    r#type: Some(Identifier {
+                        name: d.type_name.clone(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ctx,
+            ),
+            (None, None) => unreachable!(
+                "override for '{}' has neither gleamType nor dbType; Options::parse rejects that",
+                o.column
+            ),
+        }
     }
 
     /// Render a parameter as one element of the driver's params list.

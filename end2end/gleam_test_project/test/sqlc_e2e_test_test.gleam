@@ -4,6 +4,10 @@
 // Run: docker compose -f end2end/docker-compose.yml up -d
 //       cd end2end/gleam_test_project && gleam test
 
+import generated/models
+import generated/nullable_arrays/models as nullable_models
+import generated/nullable_arrays/query as nullable_query
+import generated/query
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -12,8 +16,6 @@ import gleeunit/should
 import postgleam
 import postgleam/config
 import postgleam/error
-import generated/models
-import generated/query
 
 pub fn main() {
   gleeunit.main()
@@ -198,8 +200,7 @@ pub fn test_narg_null_test() {
   |> should.be_ok()
 
   // With None pattern, COALESCE defaults to '%' — matches all
-  let result =
-    query.get_author_by_name_pattern(conn, None) |> should.be_ok()
+  let result = query.get_author_by_name_pattern(conn, None) |> should.be_ok()
   should.equal(result.count, 2)
 
   cleanup(conn)
@@ -400,9 +401,11 @@ pub fn test_numeric_types_test() {
   should.equal(row.c_integer, Some(-23_423))
   should.equal(row.c_bigint, Some(4_235_235_263))
   should.be_true(is_some_float_near(row.c_real, 3.83, 0.01))
-  should.be_true(
-    is_some_float_near(row.c_double_precision, -8_403_284.321435, 0.001),
-  )
+  should.be_true(is_some_float_near(
+    row.c_double_precision,
+    -8_403_284.321435,
+    0.001,
+  ))
 
   query.truncate_postgres_numeric_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -507,9 +510,11 @@ pub fn test_floating_point_types_test() {
 
   let row = query.get_postgres_numeric_types(conn) |> should.be_ok()
   should.be_true(is_some_float_near(row.c_real, 3.83, 0.01))
-  should.be_true(
-    is_some_float_near(row.c_double_precision, -8_403_284.321435, 0.001),
-  )
+  should.be_true(is_some_float_near(
+    row.c_double_precision,
+    -8_403_284.321435,
+    0.001,
+  ))
 
   query.truncate_postgres_numeric_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
@@ -674,10 +679,7 @@ pub fn test_network_types_insert_test() {
 
   // Verify count via simple_query
   let result =
-    postgleam.simple_query(
-      conn,
-      "SELECT count(*) FROM postgres_network_types",
-    )
+    postgleam.simple_query(conn, "SELECT count(*) FROM postgres_network_types")
     |> should.be_ok()
   should.be_true(result != [])
 
@@ -750,9 +752,24 @@ pub fn test_special_types_test() {
   let conn = connect()
   query.truncate_postgres_special_types(conn) |> should.be_ok()
 
-  let uuid_bytes =
-    <<0x55, 0x0E, 0x84, 0x00, 0xE2, 0x9B, 0x41, 0xD4, 0xA7, 0x16, 0x44, 0x66,
-      0x55, 0x44, 0x00, 0x00>>
+  let uuid_bytes = <<
+    0x55,
+    0x0E,
+    0x84,
+    0x00,
+    0xE2,
+    0x9B,
+    0x41,
+    0xD4,
+    0xA7,
+    0x16,
+    0x44,
+    0x66,
+    0x55,
+    0x44,
+    0x00,
+    0x00,
+  >>
 
   // Use simple_query for insert because c_enum has a custom OID
   // that PostGleam doesn't have a codec for
@@ -876,8 +893,10 @@ pub fn test_json_types_test() {
       c_json_string_override: Some("{\"name\": \"override\"}"),
       c_jsonb: Some("{\"name\": \"Swordfishtrombones\"}"),
       c_jsonpath: Some("$.name"),
-      c_xml: None, c_xml_string_override: None,
-      c_uuid: None, c_enum: None,
+      c_xml: None,
+      c_xml_string_override: None,
+      c_uuid: None,
+      c_enum: None,
     ),
   )
   |> should.be_ok()
@@ -901,9 +920,13 @@ pub fn test_invalid_json_test() {
       conn,
       query.InsertPostgresSpecialTypesParams(
         c_json: Some("not valid json"),
-        c_json_string_override: None, c_jsonb: None,
-        c_jsonpath: None, c_xml: None, c_xml_string_override: None,
-        c_uuid: None, c_enum: None,
+        c_json_string_override: None,
+        c_jsonb: None,
+        c_jsonpath: None,
+        c_xml: None,
+        c_xml_string_override: None,
+        c_uuid: None,
+        c_enum: None,
       ),
     )
   should.be_error(result)
@@ -920,16 +943,36 @@ pub fn test_uuid_types_test() {
   let conn = connect()
   query.truncate_postgres_special_types(conn) |> should.be_ok()
 
-  let uuid_bytes =
-    <<0xA0, 0xEE, 0xBC, 0x99, 0x9C, 0x0B, 0x4E, 0xF8, 0xBB, 0x6D, 0x6B, 0xB9,
-      0xBD, 0x38, 0x0A, 0x11>>
+  let uuid_bytes = <<
+    0xA0,
+    0xEE,
+    0xBC,
+    0x99,
+    0x9C,
+    0x0B,
+    0x4E,
+    0xF8,
+    0xBB,
+    0x6D,
+    0x6B,
+    0xB9,
+    0xBD,
+    0x38,
+    0x0A,
+    0x11,
+  >>
 
   query.insert_postgres_special_types(
     conn,
     query.InsertPostgresSpecialTypesParams(
-      c_json: None, c_json_string_override: None, c_jsonb: None,
-      c_jsonpath: None, c_xml: None, c_xml_string_override: None,
-      c_uuid: Some(uuid_bytes), c_enum: None,
+      c_json: None,
+      c_json_string_override: None,
+      c_jsonb: None,
+      c_jsonpath: None,
+      c_xml: None,
+      c_xml_string_override: None,
+      c_uuid: Some(uuid_bytes),
+      c_enum: None,
     ),
   )
   |> should.be_ok()
@@ -948,9 +991,14 @@ pub fn test_uuid_types_null_test() {
   query.insert_postgres_special_types(
     conn,
     query.InsertPostgresSpecialTypesParams(
-      c_json: None, c_json_string_override: None, c_jsonb: None,
-      c_jsonpath: None, c_xml: None, c_xml_string_override: None,
-      c_uuid: None, c_enum: None,
+      c_json: None,
+      c_json_string_override: None,
+      c_jsonb: None,
+      c_jsonpath: None,
+      c_xml: None,
+      c_xml_string_override: None,
+      c_uuid: None,
+      c_enum: None,
     ),
   )
   |> should.be_ok()
@@ -976,11 +1024,14 @@ pub fn test_xml_types_test() {
   query.insert_postgres_special_types(
     conn,
     query.InsertPostgresSpecialTypesParams(
-      c_json: None, c_json_string_override: None, c_jsonb: None,
+      c_json: None,
+      c_json_string_override: None,
+      c_jsonb: None,
       c_jsonpath: None,
       c_xml: Some(xml_val),
       c_xml_string_override: Some("<root>override</root>"),
-      c_uuid: None, c_enum: None,
+      c_uuid: None,
+      c_enum: None,
     ),
   )
   |> should.be_ok()
@@ -1002,11 +1053,14 @@ pub fn test_invalid_xml_test() {
     query.insert_postgres_special_types(
       conn,
       query.InsertPostgresSpecialTypesParams(
-        c_json: None, c_json_string_override: None, c_jsonb: None,
+        c_json: None,
+        c_json_string_override: None,
+        c_jsonb: None,
         c_jsonpath: None,
         c_xml: Some("not valid xml <<<<"),
         c_xml_string_override: None,
-        c_uuid: None, c_enum: None,
+        c_uuid: None,
+        c_enum: None,
       ),
     )
   should.be_error(result)
@@ -1209,10 +1263,10 @@ pub fn test_multiple_arrays_test() {
   let result =
     query.get_authors_by_ids_and_names(
       conn,
-      query.GetAuthorsByIdsAndNamesParams(
-        param_1: [1, 2, 3],
-        param_2: ["Alpha", "Gamma"],
-      ),
+      query.GetAuthorsByIdsAndNamesParams(param_1: [1, 2, 3], param_2: [
+        "Alpha",
+        "Gamma",
+      ]),
     )
     |> should.be_ok()
   should.equal(result.count, 2)
@@ -1397,10 +1451,7 @@ pub fn test_array_copy_from_test() {
 
   // Verify via simple_query since array result columns can't be decoded
   let result =
-    postgleam.simple_query(
-      conn,
-      "SELECT count(*) FROM postgres_array_types",
-    )
+    postgleam.simple_query(conn, "SELECT count(*) FROM postgres_array_types")
     |> should.be_ok()
   should.be_true(result != [])
 
@@ -1412,12 +1463,42 @@ pub fn test_uuid_copy_from_test() {
   let conn = connect()
   query.truncate_postgres_special_types(conn) |> should.be_ok()
 
-  let uuid1 =
-    <<0x55, 0x0E, 0x84, 0x00, 0xE2, 0x9B, 0x41, 0xD4, 0xA7, 0x16, 0x44, 0x66,
-      0x55, 0x44, 0x00, 0x00>>
-  let uuid2 =
-    <<0xA0, 0xEE, 0xBC, 0x99, 0x9C, 0x0B, 0x4E, 0xF8, 0xBB, 0x6D, 0x6B, 0xB9,
-      0xBD, 0x38, 0x0A, 0x11>>
+  let uuid1 = <<
+    0x55,
+    0x0E,
+    0x84,
+    0x00,
+    0xE2,
+    0x9B,
+    0x41,
+    0xD4,
+    0xA7,
+    0x16,
+    0x44,
+    0x66,
+    0x55,
+    0x44,
+    0x00,
+    0x00,
+  >>
+  let uuid2 = <<
+    0xA0,
+    0xEE,
+    0xBC,
+    0x99,
+    0x9C,
+    0x0B,
+    0x4E,
+    0xF8,
+    0xBB,
+    0x6D,
+    0x6B,
+    0xB9,
+    0xBD,
+    0x38,
+    0x0A,
+    0x11,
+  >>
 
   query.insert_postgres_special_types_batch(conn, [
     query.InsertPostgresSpecialTypesBatchParams(
@@ -1530,11 +1611,8 @@ pub fn test_json_copy_from_test() {
 // Type override test
 // ============================================================
 
-// Verifies that plugin type overrides change generated code.
-// The override in sqlc.yaml changes GetPostgresFunctions:max_timestamp
-// from String (default anyarray fallback) to Int (non-nullable).
-// We verify the generated code compiles with the overridden type
-// by importing and referencing the generated row type.
+// sqlc cannot type max(), so sqlc.yaml names the real type of each column
+// of GetPostgresFunctions with a dbType override.
 pub fn test_type_override_test() {
   let conn = connect()
   query.truncate_postgres_numeric_types(conn) |> should.be_ok()
@@ -1545,38 +1623,51 @@ pub fn test_type_override_test() {
   query.insert_postgres_numeric_types(
     conn,
     query.InsertPostgresNumericTypesParams(
-      c_boolean: None, c_bit: None, c_smallint: None,
-      c_integer: Some(42), c_bigint: None, c_decimal: None,
-      c_numeric: None, c_real: None, c_double_precision: None, c_money: None,
+      c_boolean: None,
+      c_bit: None,
+      c_smallint: None,
+      c_integer: Some(42),
+      c_bigint: None,
+      c_decimal: None,
+      c_numeric: None,
+      c_real: None,
+      c_double_precision: None,
+      c_money: None,
     ),
   )
   |> should.be_ok()
-
   query.insert_postgres_string_types(
     conn,
     query.InsertPostgresStringTypesParams(
-      c_char: None, c_varchar: Some("test"), c_character_varying: None,
-      c_bpchar: None, c_text: None,
+      c_char: None,
+      c_varchar: Some("hello"),
+      c_character_varying: None,
+      c_bpchar: None,
+      c_text: None,
     ),
   )
   |> should.be_ok()
-
   query.insert_postgres_date_time_types(
     conn,
     query.InsertPostgresDateTimeTypesParams(
-      c_date: None, c_time: None, c_timestamp: Some(1_710_489_600_000_000),
-      c_timestamp_with_tz: None, c_interval: None,
+      c_date: None,
+      c_time: None,
+      c_timestamp: Some(1_700_000_000_000_000),
+      c_timestamp_with_tz: None,
+      c_interval: None,
       c_timestamp_noda_instant_override: None,
     ),
   )
   |> should.be_ok()
 
-  // The override changes max_timestamp from String to Int.
-  // The generated row type proves the override worked at compile time.
-  // At runtime, the anyarray column may fail to decode with the overridden
-  // decoder, so we just verify the function exists and is callable.
-  let _result = query.get_postgres_functions(conn)
-  // Result may be Ok or Error depending on binary protocol handling of anyarray
+  query.get_postgres_functions(conn)
+  |> should.equal(
+    Ok(query.GetPostgresFunctionsRow(
+      max_integer: Some(42),
+      max_varchar: Some("hello"),
+      max_timestamp: 1_700_000_000_000_000,
+    )),
+  )
 
   query.truncate_postgres_numeric_types(conn) |> should.be_ok()
   query.truncate_postgres_string_types(conn) |> should.be_ok()
@@ -1672,5 +1763,257 @@ pub fn copyfrom_is_atomic_test() {
     |> should.be_ok()
   should.be_true(string.contains(string.inspect(rows), "\"2\""))
   query.truncate_postgres_string_types(conn) |> should.be_ok()
+  postgleam.disconnect(conn)
+}
+
+// ============================================================
+// Types sqlc infers little about
+// ============================================================
+
+fn inferred(
+  enums: List(models.CEnum),
+  count: Int,
+  score: Int,
+  amount: String,
+) -> query.InsertPostgresInferredTypesParams {
+  query.InsertPostgresInferredTypesParams(
+    c_enum_array: Some(enums),
+    c_domain: Some("5"),
+    c_oid: Some(42),
+    c_amount: amount,
+    c_count: count,
+    c_score: Some(score),
+    c_seen_at: Some(1_700_000_000_000_000 + count),
+    c_tags: Some(["a", "b c"]),
+    c_labels: Some(tricky_labels),
+  )
+}
+
+/// Text that needs quoting or escaping inside an array literal.
+const tricky_labels = [
+  "plain", "", "NULL", "null", "two words", "say \"hi\"", "back\\slash",
+  "{braces},comma", "naïve ☃",
+]
+
+// An enum array has no binary codec: it is sent and read as an array
+// literal. A domain is a String unless typeAliases says what it is built on,
+// and it is read back whichever type PostgreSQL sends.
+pub fn enum_array_domain_and_oid_round_trip_test() {
+  let conn = connect()
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+
+  let row =
+    query.insert_postgres_inferred_types(
+      conn,
+      inferred([models.Small, models.Big], 3, 7, "12.50"),
+    )
+    |> should.be_ok()
+  should.equal(row.c_enum_array, Some([models.Small, models.Big]))
+  should.equal(row.c_domain, Some("5"))
+  should.equal(row.c_oid, Some(42))
+  should.equal(row.c_amount, "12.50")
+  should.equal(row.c_tags, Some(["a", "b c"]))
+  // An array of a type the plugin does not know (a domain over text) is a
+  // list of strings, sent and read as an array literal.
+  should.equal(row.c_labels, Some(tricky_labels))
+
+  // An empty array, and NULL for every nullable column.
+  let empty =
+    query.insert_postgres_inferred_types(
+      conn,
+      query.InsertPostgresInferredTypesParams(
+        c_enum_array: Some([]),
+        c_domain: None,
+        c_oid: None,
+        c_amount: "0",
+        c_count: 0,
+        c_score: None,
+        c_seen_at: None,
+        c_tags: None,
+        c_labels: Some([]),
+      ),
+    )
+    |> should.be_ok()
+  should.equal(empty.c_labels, Some([]))
+  should.equal(empty.c_enum_array, Some([]))
+  should.equal(empty.c_domain, None)
+  should.equal(empty.c_oid, None)
+
+  let rows = query.get_postgres_inferred_types(conn) |> should.be_ok()
+  should.equal(list.map(rows.rows, fn(r) { r.c_enum_array }), [
+    Some([models.Small, models.Big]),
+    Some([]),
+  ])
+
+  // The domain's CHECK still applies.
+  query.insert_postgres_inferred_types(
+    conn,
+    query.InsertPostgresInferredTypesParams(
+      ..inferred([], 1, 1, "1"),
+      c_domain: Some("-5"),
+    ),
+  )
+  |> should.be_error()
+
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  postgleam.disconnect(conn)
+}
+
+pub fn enum_array_param_test() {
+  let conn = connect()
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  let small =
+    query.insert_postgres_inferred_types(
+      conn,
+      inferred([models.Small], 1, 1, "1"),
+    )
+    |> should.be_ok()
+  let big =
+    query.insert_postgres_inferred_types(
+      conn,
+      inferred([models.Medium, models.Big], 2, 2, "2"),
+    )
+    |> should.be_ok()
+
+  let ids = fn(sizes) {
+    query.get_postgres_inferred_by_enums(conn, sizes)
+    |> should.be_ok()
+    |> fn(response) { list.map(response.rows, fn(r) { r.id }) }
+  }
+  should.equal(ids([models.Big]), [big.id])
+  should.equal(ids([models.Small, models.Medium]), [small.id, big.id])
+  should.equal(ids([]), [])
+
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  postgleam.disconnect(conn)
+}
+
+// sqlc types sum(bigint) as a bigint and avg(integer) as a double; both are
+// numerics in PostgreSQL and are read leniently. The other columns get
+// their real type from a dbType override in sqlc.yaml.
+pub fn aggregates_test() {
+  let conn = connect()
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  let first =
+    query.insert_postgres_inferred_types(
+      conn,
+      inferred([models.Small], 3, 7, "12.50"),
+    )
+    |> should.be_ok()
+  let second =
+    query.insert_postgres_inferred_types(
+      conn,
+      inferred([models.Big], 4, 8, "0.25"),
+    )
+    |> should.be_ok()
+
+  let stats = query.get_postgres_inferred_aggregates(conn) |> should.be_ok()
+  should.equal(stats.sum_count, 7)
+  should.equal(stats.avg_score, 7.5)
+  should.equal(stats.sum_amount, Some("12.75"))
+  should.equal(stats.max_seen_at, Some(1_700_000_000_000_004))
+  should.equal(stats.ids, Some([first.id, second.id]))
+
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  postgleam.disconnect(conn)
+}
+
+// Parameters are named after sqlc.arg() and sqlc.narg(), not after the
+// column they are compared with, and a parameter that merely shares its
+// name with a nullable column (c_tags) is not made optional.
+pub fn named_params_test() {
+  let conn = connect()
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  let low =
+    query.insert_postgres_inferred_types(
+      conn,
+      inferred([models.Small], 1, 2, "1"),
+    )
+    |> should.be_ok()
+  query.insert_postgres_inferred_types(
+    conn,
+    inferred([models.Small], 1, 9, "1"),
+  )
+  |> should.be_ok()
+
+  let find = fn(tag, excluded) {
+    query.get_postgres_inferred_by_score(
+      conn,
+      query.GetPostgresInferredByScoreParams(
+        min_score: Some(1),
+        max_score: Some(5),
+        tag: tag,
+        c_tags: excluded,
+      ),
+    )
+    |> should.be_ok()
+    |> fn(response) { list.map(response.rows, fn(r) { r.id }) }
+  }
+  should.equal(find(None, []), [low.id])
+  should.equal(find(Some("b c"), []), [low.id])
+  should.equal(find(Some("missing"), []), [])
+  should.equal(find(None, ["a", "b c"]), [])
+
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  postgleam.disconnect(conn)
+}
+
+// An array holding a NULL cannot be a List(String). The error says how to
+// read it; with nullableArrayElements the elements are Options.
+pub fn null_array_elements_test() {
+  let conn = connect()
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
+  let row =
+    query.insert_postgres_inferred_types(
+      conn,
+      inferred([models.Small], 1, 1, "1"),
+    )
+    |> should.be_ok()
+  query.set_postgres_inferred_tags(conn, row.id) |> should.be_ok()
+
+  let assert Error(error.DecodeError(message)) =
+    query.get_postgres_inferred_types(conn)
+  should.be_true(string.contains(message, "nullableArrayElements"))
+
+  let rows = nullable_query.get_postgres_inferred_types(conn) |> should.be_ok()
+  should.equal(list.map(rows.rows, fn(r) { r.c_tags }), [
+    Some([Some("a"), None, Some("c")]),
+  ])
+  // typeAliases declares the domain as an integer in this module.
+  should.equal(list.map(rows.rows, fn(r) { r.c_domain }), [Some(5)])
+
+  // NULL elements can be written too, in binary arrays and in literals.
+  let written =
+    nullable_query.insert_postgres_inferred_types(
+      conn,
+      nullable_query.InsertPostgresInferredTypesParams(
+        c_enum_array: Some([Some(nullable_models.Medium), None]),
+        c_domain: Some(9),
+        c_oid: None,
+        c_amount: "1",
+        c_count: 1,
+        c_score: None,
+        c_seen_at: None,
+        c_tags: Some([None, Some("NULL"), Some("say \"hi\" \\ {x},y")]),
+        c_labels: Some([Some("NULL"), None, Some("")]),
+      ),
+    )
+    |> should.be_ok()
+  should.equal(written.c_labels, Some([Some("NULL"), None, Some("")]))
+  should.equal(written.c_enum_array, Some([Some(nullable_models.Medium), None]))
+  should.equal(written.c_domain, Some(9))
+  should.equal(
+    written.c_tags,
+    Some([None, Some("NULL"), Some("say \"hi\" \\ {x},y")]),
+  )
+  nullable_query.get_postgres_inferred_by_enums(conn, [
+    None,
+    Some(nullable_models.Medium),
+  ])
+  |> should.be_ok()
+  |> fn(response) { list.map(response.rows, fn(r) { r.id }) }
+  |> should.equal([written.id])
+
+  query.truncate_postgres_inferred_types(conn) |> should.be_ok()
   postgleam.disconnect(conn)
 }

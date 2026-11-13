@@ -56,3 +56,7 @@ pub type PostgresSpecialType {
 pub type PostgresNotNullType {
   PostgresNotNullType(c_enum_not_null: CEnum)
 }
+
+pub type PostgresInferredType {
+  PostgresInferredType(id: Int, c_enum_array: Option(List(CEnum)), c_domain: Option(String), c_oid: Option(Int), c_amount: String, c_count: Int, c_score: Option(Int), c_seen_at: Option(Int), c_tags: Option(List(String)), c_labels: Option(List(String)))
+}

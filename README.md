@@ -201,11 +201,15 @@ are rejected with an error at generation time.
   argument, two or more become a `<Query>Params` record
 - **Enums**: PostgreSQL enums become Gleam custom types with `to_string` /
   `from_string` helpers, and enum columns and params use those types
-- **Arrays**: PostgreSQL array columns and params map to `List(T)`
-- **`sqlc.arg('name')` / `sqlc.narg('name')`** for parameter names and forced nullability
+- **Arrays**: PostgreSQL array columns and params map to `List(T)`, including
+  arrays of enums; `nullableArrayElements` makes them `List(Option(T))`
+- **`sqlc.arg('name')` / `sqlc.narg('name')`** for parameter names and forced nullability.
+  The parameter gets the name you wrote, not the name of the column it is compared with
 - **`sqlc.embed(table)`** expands embedded tables into prefixed fields
-- **`sqlc.slice('name')`** for dynamic `IN (...)` lists (SQLite)
-- **Type overrides** per column
+- **`sqlc.slice('name')`** for dynamic `IN (...)` lists (SQLite), also next to
+  `sqlc.arg()` parameters
+- **Type overrides** per column, by Gleam type or by database type, and
+  **type aliases** for domains and other types sqlc does not describe
 - **Safe names**: SQL names that are not valid Gleam (spaces, leading digits,
   keywords, clashing enum values) are rewritten, and strings and comments are escaped
 
@@ -218,11 +222,16 @@ codegen:
     options:
       module: "postgleam/pool"
       uuidAsString: true
+      typeAliases:
+        positive_int: "integer"
       overrides:
         - column: "GetAuthor:bio"
           gleamType:
             type: "String"
             notNull: true
+        - column: "GetStats:total"
+          dbType:
+            type: "numeric"
 ```
 
 Unknown options, wrong value types and invalid values fail generation with an
@@ -235,7 +244,9 @@ error, so a typo cannot silently change the output.
 | `uuidAsString` | `false` | Map `uuid` to `String` instead of `BitArray`. Params are parsed before the query runs; an invalid UUID returns `EncodeError`. PostgreSQL only. |
 | `modelsModule` | derived from `out` | Gleam module path of `models.gleam`, needed for enum types when `out` is not under `src/`. |
 | `skipModels` | `false` | Don't generate `models.gleam`. Enum columns are then typed as `String`. |
-| `overrides` | `[]` | Override a column's type: `QueryName:column` or `*:column`, with `type` one of `String`, `Int`, `Float`, `Bool`, `BitArray`. |
+| `overrides` | `[]` | Override a result column's type: `QueryName:column` or `*:column` (the query's own entry wins). Give either `gleamType` (`type` one of `String`, `Int`, `Float`, `Bool`, `BitArray`, plus `notNull`) or `dbType` (`type` a database type from the tables below or an enum, plus `notNull` and `array`). See [When sqlc gets a type wrong](#when-sqlc-gets-a-type-wrong). |
+| `typeAliases` | `{}` | Database types sqlc does not describe to plugins, such as PostgreSQL domains, each mapped to a type from the tables below: `positive_int: "integer"`. Without an alias such a type is a `String`. |
+| `nullableArrayElements` | `false` | Type array elements as `Option`: `List(Option(Int))` instead of `List(Int)`. Needed to read or write arrays that hold `NULL`s. PostgreSQL only. |
 
 `postgleamVersion` and `queryTimeout` are deprecated: they are still accepted, print a
 warning and have no effect. With postgleam 0.9, set timeouts on the connection or pool config.
@@ -283,24 +294,86 @@ value and decode modules.
 | `inet` / `cidr` | `#(Int, BitArray, Int)` | `value.Inet` | `decode.inet` |
 | `macaddr` / `macaddr8` | `BitArray` | `value.Macaddr` / `Macaddr8` | `decode.macaddr` / `macaddr8` |
 | `bit` / `varbit` | `#(Int, BitArray)` | `value.BitString` | `decode.bit_string` |
+| `oid` | `Int` | `value.Oid` | generated `decode_oid` |
 | enum types | the generated custom type | its text value | its `from_string` |
 | `T[]` | `List(T)` | `value.Array` | array of the element decoder |
+| enum `[]` | `List(Enum)` | an array literal such as `{"a","b"}` | parsed from the array literal |
 | nullable `T` | `Option(T)` | `None` → `NULL` | `decode.optional` |
 
-Other types (for example `tsvector` or types from extensions) fall back to
-`String` with a warning; use an override if you need something else.
+Other types (for example `tsvector`, domains or types from extensions) are a
+`String`, with a warning at generation time. They are sent as text and read
+back as text whichever way PostgreSQL answers, and their arrays are lists of
+strings sent as array literals. Name the real type with `typeAliases` or a
+`dbType` override when you want something better.
+
+#### When sqlc gets a type wrong
+
+sqlc does not always know the type of an expression, and it does not tell
+plugins what a domain is built on. Three things to know:
+
+- **Aggregates.** sqlc picks an aggregate's type without looking at its
+  argument: `sum()` is always a `bigint` and `avg()` a `double precision`,
+  while PostgreSQL answers `sum(bigint)` and `avg(integer)` with a `numeric`.
+  The generated decoders for function results accept both, so those work. A
+  `sum()` over a `numeric` column with decimals does not fit an `Int`, and
+  `max()`, `min()` and `array_agg()` have no type at all (they become
+  `String`): give those columns a `dbType` override.
+
+  ```yaml
+  overrides:
+    - column: "GetStats:total"       # sum(price), a numeric
+      dbType: { type: "numeric" }
+    - column: "GetStats:latest"      # max(created_at)
+      dbType: { type: "timestamptz" }
+    - column: "GetStats:ids"         # array_agg(id)
+      dbType: { type: "bigint", array: true }
+  ```
+
+  sqlc also reports most aggregates as `NOT NULL`, although they are `NULL`
+  over zero rows. An override without `notNull: true` is nullable; for the
+  others use `COALESCE` in the query.
+
+- **Domains.** `CREATE DOMAIN positive_int AS integer` is an unknown type to
+  the plugin. `typeAliases: { positive_int: "integer" }` makes it an `Int`.
+  Its parameters are sent as text, because postgleam has no codec for the
+  domain itself; that covers integers, floats, booleans, text, numerics,
+  JSON and enums. A domain over another type (a timestamp, say) can be read
+  but not sent. Arrays of an aliased type are lists of strings.
+
+- **NULLs in arrays.** `List(Int)` cannot hold a `NULL`; reading such an
+  array fails with an error that names the `nullableArrayElements` option.
 
 ### SQLite
 
 | SQLite | Gleam | Param | Decoder |
 |--------|-------|-------|---------|
 | `INTEGER` (and other `INT` types) | `Int` | `glite.int` | `decode.int` |
-| `REAL` / `DOUBLE` / `FLOAT` | `Float` | `glite.float` | `decode.float` |
+| `REAL` / `DOUBLE` / `FLOAT` | `Float` | `glite.float` | `decode.float` (or the lenient decoder below for expressions) |
 | `TEXT` / `VARCHAR` / `CHAR` / `CLOB` | `String` | `glite.text` | `decode.text` |
 | `BLOB` | `BitArray` | `glite.blob` | `decode.blob` |
 | `BOOLEAN` | `Bool` | `glite.bool` | `decode.bool` |
-| `NUMERIC` / `DECIMAL` / `DATE` / `DATETIME` / `TIMESTAMP` | `String` | `glite.text` | `decode.text` |
+| `NUMERIC` / `DECIMAL` | `Float` | `glite.float` | generated `decode_number` |
+| `DATE` / `DATETIME` / `TIMESTAMP` | `String` | `glite.text` | generated `decode_text_or_number` |
+| no declared type, or one SQLite's rules do not cover | `String` | `glite.text` | generated `decode_text_or_number` |
 | nullable `T` | `Option(T)` | `glite.nullable` | `decode.optional` |
+
+A length or precision, as in `VARCHAR(20)` or `DECIMAL(10, 2)`, does not change the type.
+
+SQLite decides how to store a value from the column's affinity, not from its
+declared type, and the generated decoders follow that:
+
+- `NUMERIC` and `DECIMAL` columns hold an integer or a float, never an exact
+  decimal, so they are `Float`s. A whole number such as `3.0` is stored as the
+  integer `3` and still read back as `3.0`. The same goes for expressions
+  such as `sum()` and `max()`, which answer with an integer when they can.
+- Date and time columns are `String`s, the usual ISO-8601 text. They have
+  `NUMERIC` affinity too, so text that looks like a number (a unix time
+  written as `"1700000000"`) is stored as a number and read back as its
+  digits. For a column that holds unix times, use an override with
+  `gleamType: { type: "Int" }`.
+
+`typeAliases` and `dbType` overrides work for SQLite too, with the type names
+of this table.
 
 ## Development
 

@@ -412,3 +412,55 @@ SELECT * FROM postgres_geometric_types LIMIT 1;
 
 -- name: TruncatePostgresGeoTypes :exec
 TRUNCATE TABLE postgres_geometric_types;
+
+/* Types sqlc infers little about */
+
+-- name: InsertPostgresInferredTypes :one
+INSERT INTO postgres_inferred_types
+(
+    c_enum_array,
+    c_domain,
+    c_oid,
+    c_amount,
+    c_count,
+    c_score,
+    c_seen_at,
+    c_tags,
+    c_labels
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING *;
+
+-- name: GetPostgresInferredTypes :many
+SELECT * FROM postgres_inferred_types ORDER BY id;
+
+-- name: GetPostgresInferredAggregates :one
+SELECT
+    SUM(c_count) AS sum_count,
+    AVG(c_score) AS avg_score,
+    SUM(c_amount) AS sum_amount,
+    MAX(c_seen_at) AS max_seen_at,
+    ARRAY_AGG(id ORDER BY id) AS ids
+FROM postgres_inferred_types;
+
+-- name: GetPostgresInferredByEnums :many
+SELECT id FROM postgres_inferred_types
+WHERE c_enum_array && sqlc.arg(sizes)::c_enum []
+ORDER BY id;
+
+-- name: GetPostgresInferredByScore :many
+SELECT id FROM postgres_inferred_types
+WHERE
+    c_score >= sqlc.arg(min_score)
+    AND c_score <= sqlc.arg(max_score)
+    AND (sqlc.narg(tag)::text IS NULL OR sqlc.narg(tag)::text = ANY(c_tags))
+    AND c_tags IS DISTINCT FROM sqlc.arg(c_tags)::text []
+ORDER BY id;
+
+-- name: SetPostgresInferredTags :exec
+UPDATE postgres_inferred_types
+SET c_tags = ARRAY['a', NULL, 'c']
+WHERE id = $1;
+
+-- name: TruncatePostgresInferredTypes :exec
+TRUNCATE TABLE postgres_inferred_types;

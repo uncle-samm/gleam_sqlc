@@ -82,6 +82,29 @@ pub fn generate(request: GenerateRequest) -> Result<GenerateResponse, String> {
             .map(|p| format!("{}.", path_alias(p))),
     };
 
+    // A mistyped type name must not quietly become a String.
+    for o in &options.overrides {
+        if let Some(d) = &o.db_type
+            && !driver.knows_type(&d.type_name, &ctx)
+        {
+            return Err(format!(
+                "override for '{}': dbType '{}' is not a type sqlc-gen-gleam knows for the {engine} engine",
+                o.column, d.type_name
+            ));
+        }
+    }
+    for (alias, target) in &options.type_aliases {
+        let chained = options
+            .type_aliases
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case(target));
+        if chained || !driver.knows_type(target, &ctx) {
+            return Err(format!(
+                "typeAliases: '{alias}' must map to a type sqlc-gen-gleam knows for the {engine} engine, not '{target}'"
+            ));
+        }
+    }
+
     for (filename, queries) in &group_queries_by_file(&request.queries) {
         let module_name = filename_to_module(filename);
         if write_models && module_name == "models" {
@@ -193,6 +216,66 @@ mod tests {
     fn test_group_queries_empty() {
         let groups = group_queries_by_file(&[]);
         assert!(groups.is_empty());
+    }
+
+    fn request(engine: &str, options: &str) -> GenerateRequest {
+        GenerateRequest {
+            settings: Some(crate::plugin::plugin::Settings {
+                engine: engine.into(),
+                ..Default::default()
+            }),
+            plugin_options: options.as_bytes().to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unknown_db_types_in_options_are_errors() {
+        let err = generate(request(
+            "postgresql",
+            r#"{"overrides": [{"column": "Q:c", "dbType": {"type": "numerik"}}]}"#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("numerik"), "{err}");
+
+        let err = generate(request(
+            "postgresql",
+            r#"{"typeAliases": {"posint": "integr"}}"#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("integr"), "{err}");
+
+        // An alias may not point at another alias.
+        let err = generate(request(
+            "postgresql",
+            r#"{"typeAliases": {"posint": "myint", "myint": "integer"}}"#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("posint"), "{err}");
+
+        assert!(
+            generate(request(
+                "postgresql",
+                r#"{"typeAliases": {"posint": "integer"},
+                    "overrides": [{"column": "Q:c", "dbType": {"type": "posint"}},
+                                  {"column": "Q:d", "dbType": {"type": "numeric", "array": true}}]}"#,
+            ))
+            .is_ok()
+        );
+        assert!(
+            generate(request(
+                "sqlite",
+                r#"{"typeAliases": {"MONEY": "INTEGER"},
+                    "overrides": [{"column": "Q:c", "dbType": {"type": "DECIMAL(10,2)"}}]}"#,
+            ))
+            .is_ok()
+        );
+        let err = generate(request(
+            "sqlite",
+            r#"{"overrides": [{"column": "Q:c", "dbType": {"type": "WIDGET"}}]}"#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("WIDGET"), "{err}");
     }
 
     #[test]

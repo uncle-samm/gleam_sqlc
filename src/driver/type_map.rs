@@ -16,6 +16,10 @@ pub struct GleamType {
     pub param_arity: u8,
     /// UUID kept as a String in Gleam: must be parsed before it can be sent.
     pub uuid_string: bool,
+    /// `Some(f)` when arrays of this type have no binary codec and are sent
+    /// as an array literal instead. `f` turns one element into its text; an
+    /// empty `f` means the element already is a String.
+    pub literal_fn: Option<String>,
 }
 
 impl GleamType {
@@ -34,6 +38,25 @@ impl GleamType {
             decoder_fn: decoder_fn.into(),
             param_arity: arity,
             uuid_string: false,
+            literal_fn: None,
+        }
+    }
+}
+
+/// The shape around a base type: can the value be NULL, is it an array, and
+/// can the array's elements be NULL.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shape {
+    pub nullable: bool,
+    pub array: bool,
+    pub elem_nullable: bool,
+}
+
+impl Shape {
+    pub fn scalar(nullable: bool) -> Self {
+        Self {
+            nullable,
+            ..Default::default()
         }
     }
 }
@@ -48,17 +71,17 @@ pub struct ResolvedType {
 
 impl ResolvedType {
     /// Build a resolved type from a base type, wrapping it for nullability / arrays.
-    pub fn from_base(
-        base: GleamType,
-        nullable: bool,
-        array: bool,
-        array_decoder: Option<String>,
-    ) -> Self {
-        let elem_type = base.type_name.clone();
-        let type_inner = if array {
-            format!("List({elem_type})")
-        } else {
-            elem_type
+    /// `array_decoder` decodes the whole array; it is only used for arrays.
+    pub fn from_base(base: GleamType, shape: Shape, array_decoder: Option<String>) -> Self {
+        let Shape {
+            nullable,
+            array,
+            elem_nullable,
+        } = shape;
+        let type_inner = match (array, elem_nullable) {
+            (true, true) => format!("List(Option({}))", base.type_name),
+            (true, false) => format!("List({})", base.type_name),
+            (false, _) => base.type_name.clone(),
         };
         let type_expr = if nullable {
             format!("Option({type_inner})")
@@ -67,12 +90,18 @@ impl ResolvedType {
         };
 
         let param_expr = if base.uuid_string {
-            ParamExpr::UuidString { nullable, array }
+            ParamExpr::UuidString {
+                nullable,
+                array,
+                elem_nullable,
+            }
         } else if array {
             ParamExpr::Array {
                 elem_fn: base.param_fn.clone(),
                 arity: base.param_arity,
                 nullable,
+                elem_nullable,
+                literal_fn: base.literal_fn.clone(),
             }
         } else {
             ParamExpr::Value {
@@ -115,15 +144,22 @@ pub enum ParamExpr {
         arity: u8,
         nullable: bool,
     },
-    /// A list of values encoded as a PostgreSQL array.
+    /// A list of values encoded as a PostgreSQL array. With `literal_fn` the
+    /// array is sent as an array literal (see `GleamType::literal_fn`).
     Array {
         elem_fn: String,
         arity: u8,
         nullable: bool,
+        elem_nullable: bool,
+        literal_fn: Option<String>,
     },
     /// A UUID held as a String: parsed before the query runs, failing with
     /// an EncodeError instead of silently sending NULL or bad bytes.
-    UuidString { nullable: bool, array: bool },
+    UuidString {
+        nullable: bool,
+        array: bool,
+        elem_nullable: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

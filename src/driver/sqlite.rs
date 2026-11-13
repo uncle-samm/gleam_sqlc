@@ -1,5 +1,8 @@
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::driver::traits::{Driver, path_alias, uses_module};
-use crate::driver::type_map::{GleamType, ParamExpr, ResolvedType, TypeContext};
+use crate::driver::type_map::{GleamType, ParamExpr, ResolvedType, Shape, TypeContext};
 use crate::options::Options;
 use crate::plugin::plugin::Column;
 use crate::utils::CodeWriter;
@@ -15,6 +18,10 @@ pub struct SqliteDriver {
     /// Module holding the param constructors (`int`, `text`, `nullable`, ...).
     /// `glite/tx` has none, so in that case they come from `glite`.
     value_module: String,
+    /// User-declared aliases (uppercase) for types the plugin does not know.
+    type_aliases: BTreeMap<String, String>,
+    /// Unknown types already warned about, so each is reported once.
+    warned: RefCell<BTreeSet<String>>,
 }
 
 impl SqliteDriver {
@@ -41,8 +48,21 @@ impl SqliteDriver {
             alias,
             decode_import,
             value_module,
+            type_aliases: options
+                .type_aliases
+                .iter()
+                .map(|(k, v)| (normalize(k), v.clone()))
+                .collect(),
+            warned: RefCell::new(BTreeSet::new()),
         }
     }
+}
+
+/// A declared type in the form the type tables use: uppercase, without a
+/// length or precision such as the `(10,2)` of `DECIMAL(10,2)`.
+fn normalize(sqlite_type: &str) -> String {
+    let upper = sqlite_type.to_uppercase();
+    upper.split('(').next().unwrap_or("").trim().to_string()
 }
 
 impl Driver for SqliteDriver {
@@ -64,9 +84,37 @@ impl Driver for SqliteDriver {
             .as_ref()
             .map(|t| t.name.as_str())
             .unwrap_or("text");
-        let base = sqlite_type_to_gleam(col_type, &self.value_module);
+        let declared = normalize(col_type);
+        let declared = self
+            .type_aliases
+            .get(&declared)
+            .map(|target| normalize(target))
+            .unwrap_or(declared);
+        let mut base = sqlite_known_type(&declared, &self.value_module).unwrap_or_else(|| {
+            if self.warned.borrow_mut().insert(declared.clone()) {
+                eprintln!(
+                    "warning: unknown SQLite type '{col_type}' (e.g. column '{}'): typed as String. \
+                     If that is wrong, name a type the plugin knows with the typeAliases option, \
+                     or override the column.",
+                    col.name
+                );
+            }
+            text_or_number(&self.value_module)
+        });
+        // Only a REAL column is sure to hold a float: an expression such as
+        // sum() or max() answers with an integer when the number is whole.
+        let from_table = col.table.as_ref().is_some_and(|t| !t.name.is_empty());
+        if base.decoder_fn == "decode.float" && !from_table {
+            base.decoder_fn = "decode_number".into();
+        }
         // SQLite has no array types.
-        ResolvedType::from_base(base, !col.not_null, false, None)
+        ResolvedType::from_base(base, Shape::scalar(!col.not_null), None)
+    }
+
+    fn knows_type(&self, type_name: &str, _ctx: &TypeContext) -> bool {
+        let declared = normalize(type_name);
+        self.type_aliases.contains_key(&declared)
+            || sqlite_known_type(&declared, &self.value_module).is_some()
     }
 
     fn override_base(&self, type_name: &str) -> GleamType {
@@ -74,7 +122,9 @@ impl Driver for SqliteDriver {
         match type_name {
             "String" => GleamType::simple("String", &format!("{m}.text"), "decode.text"),
             "Int" => GleamType::simple("Int", &format!("{m}.int"), "decode.int"),
-            "Float" => GleamType::simple("Float", &format!("{m}.float"), "decode.float"),
+            // An overridden column is usually an expression, which answers
+            // with an integer when the number is whole.
+            "Float" => GleamType::simple("Float", &format!("{m}.float"), "decode_number"),
             "Bool" => GleamType::simple("Bool", &format!("{m}.bool"), "decode.bool"),
             "BitArray" => GleamType::simple("BitArray", &format!("{m}.blob"), "decode.blob"),
             other => {
@@ -122,14 +172,37 @@ impl Driver for SqliteDriver {
     }
 
     fn extra_imports(&self, body: &str) -> Vec<String> {
+        let mut imports = Vec::new();
         if self.value_module != self.alias && uses_module(body, &self.value_module) {
-            vec![self.value_module.clone()]
-        } else {
-            Vec::new()
+            imports.push(self.value_module.clone());
         }
+        // The helpers below match on glite's value type.
+        if uses_module(body, "value") {
+            imports.push("glite/value".to_string());
+        }
+        imports
     }
 
-    fn write_helpers(&self, _body: &str, _ctx: &TypeContext, _w: &mut CodeWriter) {}
+    fn write_helpers(&self, body: &str, _ctx: &TypeContext, w: &mut CodeWriter) {
+        let mut wrote = false;
+        for (name, text) in [
+            ("decode_number", DECODE_NUMBER),
+            ("decode_text_or_number", DECODE_TEXT_OR_NUMBER),
+        ] {
+            let used = [format!("{name})"), format!("{name},")]
+                .iter()
+                .any(|needle| body.contains(needle));
+            if used {
+                if wrote {
+                    w.blank();
+                }
+                wrote = true;
+                for line in text.trim_matches('\n').lines() {
+                    w.line(line);
+                }
+            }
+        }
+    }
 
     fn write_one_call(&self, sql: &str, params: &str, w: &mut CodeWriter) {
         let m = self.module_name();
@@ -162,77 +235,111 @@ impl Driver for SqliteDriver {
     }
 }
 
-/// Map a SQLite type name to Gleam type info.
+const DECODE_NUMBER: &str = r#"
+/// SQLite stores a whole number as an integer, in a NUMERIC column and as
+/// the result of an expression such as sum().
+fn decode_number(v: value.Value) -> Result(Float, String) {
+  case v {
+    value.Integer(n) -> Ok(int.to_float(n))
+    _ -> decode.float(v)
+  }
+}
+"#;
+
+const DECODE_TEXT_OR_NUMBER: &str = r#"
+/// Date, time and untyped columns have NUMERIC affinity: SQLite stores text
+/// that looks like a number as a number. It is read back as text.
+fn decode_text_or_number(v: value.Value) -> Result(String, String) {
+  case v {
+    value.Integer(n) -> Ok(int.to_string(n))
+    value.Real(f) -> Ok(float.to_string(f))
+    _ -> decode.text(v)
+  }
+}
+"#;
+
+/// A String column with NUMERIC affinity, which may hold a number.
+fn text_or_number(module: &str) -> GleamType {
+    GleamType::simple("String", &format!("{module}.text"), "decode_text_or_number")
+}
+
+/// Map a SQLite type name to Gleam type info, falling back to String for a
+/// type none of the rules cover.
+#[cfg(test)]
+fn sqlite_type_to_gleam(sqlite_type: &str, module: &str) -> GleamType {
+    sqlite_known_type(&normalize(sqlite_type), module).unwrap_or_else(|| text_or_number(module))
+}
+
+/// Map a declared SQLite type (see `normalize`) to Gleam type info. `None`
+/// for a type none of the rules cover.
 ///
 /// SQLite uses type affinity rules. The declared type is mapped to one of
-/// five storage classes: INTEGER, REAL, TEXT, BLOB, or NUMERIC.
+/// five affinities: INTEGER, REAL, TEXT, BLOB, or NUMERIC.
 /// See: https://www.sqlite.org/datatype3.html
-fn sqlite_type_to_gleam(sqlite_type: &str, module: &str) -> GleamType {
-    let type_name = sqlite_type.to_uppercase();
-    let type_name = type_name.trim();
+fn sqlite_known_type(type_name: &str, module: &str) -> Option<GleamType> {
+    let int = || GleamType::simple("Int", &format!("{module}.int"), "decode.int");
+    let float = || GleamType::simple("Float", &format!("{module}.float"), "decode.float");
+    let text = || GleamType::simple("String", &format!("{module}.text"), "decode.text");
+    let blob = || GleamType::simple("BitArray", &format!("{module}.blob"), "decode.blob");
 
-    // SQLite type affinity rules (simplified for common types)
-    match type_name {
+    Some(match type_name {
         // Integer affinity
         "INT" | "INTEGER" | "TINYINT" | "SMALLINT" | "MEDIUMINT" | "BIGINT"
-        | "UNSIGNED BIG INT" | "INT2" | "INT8" => {
-            GleamType::simple("Int", &format!("{module}.int"), "decode.int")
-        }
+        | "UNSIGNED BIG INT" | "INT2" | "INT8" => int(),
 
         // Boolean (stored as INTEGER 0/1 in SQLite)
         "BOOLEAN" | "BOOL" => GleamType::simple("Bool", &format!("{module}.bool"), "decode.bool"),
 
         // Real affinity
-        "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT" => {
-            GleamType::simple("Float", &format!("{module}.float"), "decode.float")
-        }
+        "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT" => float(),
 
         // Text affinity
         "TEXT" | "CHARACTER" | "VARCHAR" | "VARYING CHARACTER" | "NCHAR" | "NATIVE CHARACTER"
-        | "NVARCHAR" | "CLOB" => {
-            GleamType::simple("String", &format!("{module}.text"), "decode.text")
-        }
+        | "NVARCHAR" | "CLOB" => text(),
 
         // Blob affinity
-        "BLOB" => GleamType::simple("BitArray", &format!("{module}.blob"), "decode.blob"),
+        "BLOB" => blob(),
 
-        // Numeric affinity (decimal/numeric → String since Gleam has no Decimal)
+        // Numeric affinity: SQLite stores these as INTEGER or REAL, never as
+        // an exact decimal, so they are floats.
         "NUMERIC" | "DECIMAL" => {
-            GleamType::simple("String", &format!("{module}.text"), "decode.text")
+            GleamType::simple("Float", &format!("{module}.float"), "decode_number")
         }
 
-        // Date/time types (stored as TEXT in SQLite, or INTEGER for unix epoch)
-        "DATE" | "DATETIME" | "TIMESTAMP" => {
-            GleamType::simple("String", &format!("{module}.text"), "decode.text")
-        }
+        // Date and time types also have NUMERIC affinity. They usually hold
+        // ISO-8601 text; a unix time or Julian day comes back as its digits.
+        "DATE" | "DATETIME" | "TIMESTAMP" => text_or_number(module),
 
-        // Apply SQLite type affinity rules for unrecognized types:
+        // What sqlc calls a column declared without a type, and an expression
+        // it cannot type: any storage class can turn up.
+        "ANY" | "" => text_or_number(module),
+
+        // SQLite's affinity rules for every other declared type:
         // 1. Contains "INT" → INTEGER affinity
         // 2. Contains "CHAR", "CLOB", or "TEXT" → TEXT affinity
-        // 3. Contains "BLOB" or empty → BLOB affinity
+        // 3. Contains "BLOB" → BLOB affinity
         // 4. Contains "REAL", "FLOA", or "DOUB" → REAL affinity
-        // 5. Otherwise → NUMERIC affinity (treat as TEXT)
+        // 5. Otherwise → NUMERIC affinity, reported as unknown
         _ => {
             if type_name.contains("INT") {
-                GleamType::simple("Int", &format!("{module}.int"), "decode.int")
+                int()
             } else if type_name.contains("CHAR")
                 || type_name.contains("CLOB")
                 || type_name.contains("TEXT")
             {
-                GleamType::simple("String", &format!("{module}.text"), "decode.text")
-            } else if type_name.contains("BLOB") || type_name.is_empty() {
-                GleamType::simple("BitArray", &format!("{module}.blob"), "decode.blob")
+                text()
+            } else if type_name.contains("BLOB") {
+                blob()
             } else if type_name.contains("REAL")
                 || type_name.contains("FLOA")
                 || type_name.contains("DOUB")
             {
-                GleamType::simple("Float", &format!("{module}.float"), "decode.float")
+                float()
             } else {
-                eprintln!("warning: unknown SQLite type '{sqlite_type}', falling back to String");
-                GleamType::simple("String", &format!("{module}.text"), "decode.text")
+                return None;
             }
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -294,10 +401,72 @@ mod tests {
 
     #[test]
     fn test_datetime_as_text() {
-        for t in &["DATE", "DATETIME", "TIMESTAMP"] {
+        // NUMERIC affinity: text that looks like a number is stored as one,
+        // so the decoder accepts numbers too.
+        for t in &["DATE", "DATETIME", "TIMESTAMP", "ANY", "WIDGET"] {
             let g = sqlite_type_to_gleam(t, "glite");
             assert_eq!(g.type_name, "String", "failed for type {t}");
+            assert_eq!(g.param_fn, "glite.text");
+            assert_eq!(g.decoder_fn, "decode_text_or_number");
         }
+    }
+
+    #[test]
+    fn test_numeric_and_decimal_are_floats() {
+        for t in &["NUMERIC", "DECIMAL", "decimal(10, 2)", "NUMERIC(8)"] {
+            let g = sqlite_type_to_gleam(t, "glite");
+            assert_eq!(g.type_name, "Float", "failed for type {t}");
+            assert_eq!(g.param_fn, "glite.float");
+            assert_eq!(g.decoder_fn, "decode_number");
+        }
+        // A length does not change the type.
+        assert_eq!(
+            sqlite_type_to_gleam("VARCHAR(20)", "glite").type_name,
+            "String"
+        );
+    }
+
+    #[test]
+    fn test_expressions_and_aliases() {
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        let column = |type_name: &str, table: &str| Column {
+            not_null: true,
+            r#type: Some(crate::plugin::plugin::Identifier {
+                name: type_name.into(),
+                ..Default::default()
+            }),
+            table: Some(crate::plugin::plugin::Identifier {
+                name: table.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let driver = SqliteDriver::new(&Options::default());
+        let decoder =
+            |d: &SqliteDriver, c: &Column| d.resolve_column_type(c, &ctx).decoder_expr.to_gleam();
+        // A REAL column always holds a float; sum() may answer an integer.
+        assert_eq!(decoder(&driver, &column("REAL", "t")), "decode.float");
+        assert_eq!(decoder(&driver, &column("real", "")), "decode_number");
+        assert!(driver.knows_type("DECIMAL(10,2)", &ctx));
+        assert!(!driver.knows_type("MONEY", &ctx));
+
+        let driver = SqliteDriver::new(&Options {
+            type_aliases: [("money".to_string(), "INTEGER".to_string())].into(),
+            ..Default::default()
+        });
+        assert!(driver.knows_type("MONEY", &ctx));
+        assert_eq!(decoder(&driver, &column("MONEY", "t")), "decode.int");
+
+        let mut w = CodeWriter::new();
+        driver.write_helpers("decode.element(0, decode_number)", &ctx, &mut w);
+        let helpers = w.into_string();
+        assert!(helpers.contains("fn decode_number("), "{helpers}");
+        assert!(!helpers.contains("fn decode_text_or_number("), "{helpers}");
+        assert_eq!(
+            driver.extra_imports(&helpers),
+            vec!["glite/value".to_string()]
+        );
     }
 
     #[test]
