@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 /// Plugin options from the `options:` block of a sqlc codegen entry.
@@ -13,6 +15,17 @@ pub struct Options {
 
     #[serde(default)]
     pub overrides: Vec<TypeOverride>,
+
+    /// Database types sqlc does not describe to plugins, such as PostgreSQL
+    /// domains, mapped to a type the plugin knows: `{"posint": "integer"}`.
+    /// Without an alias such a type is a String.
+    #[serde(default)]
+    pub type_aliases: BTreeMap<String, String>,
+
+    /// Type array elements as `Option`, so arrays holding NULLs can be read
+    /// and written: `List(Option(Int))` instead of `List(Int)`.
+    #[serde(default)]
+    pub nullable_array_elements: bool,
 
     /// Custom module for generated imports and function calls.
     /// Replaces the driver default ("postgleam" for PostgreSQL, "glite" for SQLite).
@@ -55,7 +68,24 @@ pub struct Options {
 pub struct TypeOverride {
     /// `QueryName:column` or `*:column`.
     pub column: String,
-    pub gleam_type: GleamTypeOverride,
+    /// The Gleam type to use. Exactly one of `gleamType` and `dbType` is set.
+    #[serde(default)]
+    pub gleam_type: Option<GleamTypeOverride>,
+    /// The database type the column really has, for when sqlc infers the
+    /// wrong one (e.g. `sum()` of a numeric column, `max()` of a timestamp).
+    #[serde(default)]
+    pub db_type: Option<DbTypeOverride>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DbTypeOverride {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    #[serde(default)]
+    pub not_null: bool,
+    #[serde(default)]
+    pub array: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,14 +142,34 @@ impl Options {
                     o.column
                 ));
             }
-            if !matches!(
-                o.gleam_type.type_name.as_str(),
-                "String" | "Int" | "Float" | "Bool" | "BitArray"
-            ) {
-                return Err(format!(
-                    "override type '{}' for '{}' is not supported (use String, Int, Float, Bool or BitArray)",
-                    o.gleam_type.type_name, o.column
-                ));
+            match (&o.gleam_type, &o.db_type) {
+                (Some(g), None) => {
+                    if !matches!(
+                        g.type_name.as_str(),
+                        "String" | "Int" | "Float" | "Bool" | "BitArray"
+                    ) {
+                        return Err(format!(
+                            "override type '{}' for '{}' is not supported (use String, Int, Float, Bool or BitArray, or name a database type with dbType)",
+                            g.type_name, o.column
+                        ));
+                    }
+                }
+                (None, Some(d)) => {
+                    if d.type_name.trim().is_empty() {
+                        return Err(format!("override for '{}' has an empty dbType", o.column));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "override for '{}' must set exactly one of gleamType and dbType",
+                        o.column
+                    ));
+                }
+            }
+        }
+        for (alias, target) in &self.type_aliases {
+            if alias.trim().is_empty() || target.trim().is_empty() {
+                return Err("typeAliases must not hold empty type names".into());
             }
         }
         Ok(())
@@ -181,6 +231,31 @@ mod tests {
             .is_err()
         );
         assert!(Options::parse(br#"{"overrides": [{"column": "*:bio", "gleamType": {"type": "String", "notNull": true}}]}"#).is_ok());
+    }
+
+    #[test]
+    fn db_type_overrides_and_aliases() {
+        let o = Options::parse(
+            br#"{"typeAliases": {"posint": "integer"}, "nullableArrayElements": true,
+                 "overrides": [{"column": "Stats:total", "dbType": {"type": "numeric", "array": true}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(o.type_aliases["posint"], "integer");
+        assert!(o.nullable_array_elements);
+        let d = o.overrides[0].db_type.as_ref().unwrap();
+        assert_eq!(
+            (d.type_name.as_str(), d.not_null, d.array),
+            ("numeric", false, true)
+        );
+
+        // Exactly one of gleamType and dbType.
+        let err = Options::parse(br#"{"overrides": [{"column": "*:bio"}]}"#).unwrap_err();
+        assert!(err.contains("exactly one"), "{err}");
+        assert!(Options::parse(
+            br#"{"overrides": [{"column": "*:bio", "gleamType": {"type": "Int"}, "dbType": {"type": "int4"}}]}"#
+        )
+        .is_err());
+        assert!(Options::parse(br#"{"typeAliases": {"posint": ""}}"#).is_err());
     }
 
     #[test]

@@ -78,3 +78,21 @@ CREATE TABLE postgres_special_types (
 CREATE TABLE postgres_not_null_types (
     c_enum_not_null        c_enum NOT NULL DEFAULT 'small'
 );
+
+CREATE DOMAIN c_positive AS INTEGER CHECK (VALUE > 0);
+CREATE DOMAIN c_label AS TEXT;
+
+-- Types and expressions sqlc tells plugins little about: enum arrays, a
+-- domain, an oid, and columns that feed aggregates.
+CREATE TABLE postgres_inferred_types (
+    id            BIGSERIAL PRIMARY KEY,
+    c_enum_array  c_enum [],
+    c_domain      c_positive,
+    c_oid         OID,
+    c_amount      NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    c_count       BIGINT NOT NULL DEFAULT 0,
+    c_score       INTEGER,
+    c_seen_at     TIMESTAMP WITH TIME ZONE,
+    c_tags        TEXT [],
+    c_labels      c_label []
+);

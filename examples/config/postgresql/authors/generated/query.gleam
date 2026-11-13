@@ -107,14 +107,14 @@ pub type GetAuthorByNamePatternRow {
   GetAuthorByNamePatternRow(id: Int, name: String, bio: Option(String))
 }
 
-pub fn get_author_by_name_pattern(conn, name: Option(String)) {
+pub fn get_author_by_name_pattern(conn, name_pattern: Option(String)) {
   let decoder = {
     use c0 <- decode.element(0, decode.int)
     use c1 <- decode.element(1, decode.text)
     use c2 <- decode.element(2, decode.optional(decode.text))
     decode.success(GetAuthorByNamePatternRow(id: c0, name: c1, bio: c2))
   }
-  postgleam.query_with(conn, get_author_by_name_pattern_sql, [option.map(name, value.Text)], decoder)
+  postgleam.query_with(conn, get_author_by_name_pattern_sql, [option.map(name_pattern, value.Text)], decoder)
 }
 
 const delete_author_sql = "DELETE FROM authors\nWHERE name = $1"

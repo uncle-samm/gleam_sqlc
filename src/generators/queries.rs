@@ -50,7 +50,7 @@ pub fn generate_queries(
 
 fn import_lines(code: &str, models_import: Option<&str>, driver: &dyn Driver) -> Vec<String> {
     let mut lines = Vec::new();
-    for module in ["int", "list"] {
+    for module in ["float", "int", "list"] {
         if uses_module(code, module) {
             lines.push(format!("import gleam/{module}"));
         }

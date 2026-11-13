@@ -13,3 +13,7 @@ pub type Book {
 pub type TypesSqlite {
   TypesSqlite(c_integer: Option(Int), c_real: Option(Float), c_text: Option(String), c_blob: Option(BitArray))
 }
+
+pub type TypesSqliteAffinity {
+  TypesSqliteAffinity(id: Int, c_numeric: Float, c_decimal: Option(Float), c_boolean: Bool, c_date: Option(String), c_datetime: String, c_timestamp: Option(String), c_varchar: Option(String), c_bigint: Option(Int), c_double: Option(Float), c_untyped: Option(String))
+}

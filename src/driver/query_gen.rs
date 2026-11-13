@@ -7,7 +7,7 @@ use crate::generators::naming::{
     column_to_field_name, doc_comment_lines, escape_gleam_string, query_to_fn_name, to_pascal_case,
 };
 use crate::options::TypeOverride;
-use crate::plugin::plugin::{Column, Identifier, Query};
+use crate::plugin::plugin::{Column, Identifier, Parameter, Query};
 use crate::utils::CodeWriter;
 
 struct ParamInfo {
@@ -74,11 +74,21 @@ pub fn generate_query_fn(
         driver,
     );
     let has_slices = params.iter().any(|p| p.is_slice);
+    // Only queries with a slice change shape at run time.
+    let positional = if has_slices {
+        positional_order(&query.text, &query.params, &params)
+    } else {
+        None
+    };
+    let (sql_text, ordered): (&str, Vec<&ParamInfo>) = match &positional {
+        Some((text, order)) => (text, order.iter().map(|i| &params[*i]).collect()),
+        None => (&query.text, params.iter().collect()),
+    };
 
     let const_name = format!("{fn_name}_sql");
     w.writef(format_args!(
         "const {const_name} = \"{}\"",
-        escape_gleam_string(&query.text)
+        escape_gleam_string(sql_text)
     ));
     w.blank();
 
@@ -113,7 +123,7 @@ pub fn generate_query_fn(
     w.indent();
 
     if cmd == ":copyfrom" {
-        generate_copyfrom_body(&const_name, &params, w, driver);
+        generate_copyfrom_body(&const_name, &ordered, w, driver);
     } else {
         let var_of = |p: &ParamInfo| {
             if use_params_type {
@@ -128,7 +138,7 @@ pub fn generate_query_fn(
         } else {
             const_name.clone()
         };
-        let params_str = emit_params(&params, &var_of, w, driver);
+        let params_str = emit_params(&ordered, &var_of, w, driver);
         if returns_rows {
             generate_decoder(&columns, &row_type_name, w);
         }
@@ -174,18 +184,23 @@ fn resolve_params(
         })?;
         let is_slice = col.is_sqlc_slice;
 
-        // Try to recover the column name from the INSERT mapping if sqlc stripped it
-        let recovered_name = if col.name.is_empty() && col.original_name.is_empty() {
-            insert_param_names.get(&p.number).cloned()
-        } else {
+        // The INSERT column this parameter fills, for when sqlc lost track
+        // of it (a cast such as `$5::uuid` drops the column and its table).
+        let has_table = col.table.as_ref().is_some_and(|t| !t.name.is_empty());
+        let insert_col = if has_table {
             None
+        } else {
+            insert_param_names.get(&p.number)
         };
 
-        let raw_name = if !col.original_name.is_empty() {
-            column_to_field_name(&col.original_name)
-        } else if !col.name.is_empty() {
+        // sqlc.arg(), sqlc.narg() and sqlc.slice() put the name the query
+        // author chose in `name`; `original_name` is the column the
+        // parameter is used with.
+        let raw_name = if !col.name.is_empty() {
             column_to_field_name(&col.name)
-        } else if let Some(ref name) = recovered_name {
+        } else if !col.original_name.is_empty() {
+            column_to_field_name(&col.original_name)
+        } else if let Some(name) = insert_col {
             column_to_field_name(name)
         } else {
             format!("param_{}", i + 1)
@@ -206,18 +221,19 @@ fn resolve_params(
             String::new()
         };
 
-        // Restore nullability from the source table column. If we recovered a column
-        // name from the INSERT mapping, look it up in the INSERT target table.
-        let effective_col = match recovered_name {
-            Some(ref recovered) => {
+        // Restore nullability from the column the parameter belongs to: the
+        // one sqlc points at, or the INSERT target column. A parameter is
+        // never matched to a column by its name alone, since the name is the
+        // query author's choice (use sqlc.narg() for a nullable parameter).
+        let effective_col = match insert_col {
+            Some(column) => {
                 let mut patched = col.clone();
-                patched.name = recovered.clone();
-                if patched.table.is_none() {
-                    patched.table = query.insert_into_table.clone();
-                }
-                restore_nullability(&patched, table_map)
+                patched.name = column.clone();
+                patched.original_name = column.clone();
+                patched.table = query.insert_into_table.clone();
+                restore_nullability(&patched, table_map, false)
             }
-            None => restore_nullability(col, table_map),
+            None => restore_nullability(col, table_map, false),
         };
         let mut resolved = driver.resolve_column_type(&effective_col, ctx);
         if is_slice {
@@ -301,10 +317,10 @@ fn resolve_columns(
         } else {
             let field_name = deduplicate_name(&column_to_field_name(&col.name), &mut seen_names);
             let resolved = match find_override(overrides, query_name, &col.name) {
-                Some((type_name, not_null)) => driver.resolve_override(type_name, not_null),
+                Some(o) => driver.resolve_override(o, ctx),
                 // Restore nullability from the source table column when sqlc loses it
                 // through type casts (e.g., `nullable_col::text`).
-                None => driver.resolve_column_type(&restore_nullability(col, table_map), ctx),
+                None => driver.resolve_column_type(&restore_nullability(col, table_map, true), ctx),
             };
             result.push(ColumnInfo {
                 field_name,
@@ -439,10 +455,10 @@ pub fn build_insert_param_map(
 /// sqlc can lose a column's nullability, e.g. `nullable_col::text` is reported as
 /// NOT NULL. If the column still points at its table, use the table's definition.
 ///
-/// When sqlc dropped the table reference, fall back to the catalog only if exactly
-/// one table has a column with that name. With several candidates we cannot know
-/// which one is meant, so sqlc's answer is kept.
-fn restore_nullability(col: &Column, table_map: &TableMap) -> Column {
+/// When sqlc dropped the table reference and `search_catalog` is set, fall back
+/// to the catalog only if exactly one table has a column with that name. With
+/// several candidates we cannot know which one is meant, so sqlc's answer is kept.
+fn restore_nullability(col: &Column, table_map: &TableMap, search_catalog: bool) -> Column {
     if !col.not_null {
         return col.clone();
     }
@@ -464,6 +480,7 @@ fn restore_nullability(col: &Column, table_map: &TableMap) -> Column {
 
     let source_nullable = match col.table.as_ref().filter(|t| !t.name.is_empty()) {
         Some(table_ref) => lookup_table(table_map, table_ref).and_then(nullable_in),
+        None if !search_catalog => None,
         None => {
             // table_map holds each table under its plain and its qualified name;
             // count distinct tables only.
@@ -498,17 +515,140 @@ fn lookup_table<'a>(
     })
 }
 
-/// Find the type override for a query column: `(type name, not_null)`.
+/// Find the type override for a query column. An override naming the query
+/// wins over a `*` one.
 fn find_override<'a>(
     overrides: &'a [TypeOverride],
     query_name: &str,
     column_name: &str,
-) -> Option<(&'a str, bool)> {
-    overrides.iter().find_map(|o| {
-        let (qname, cname) = o.column.split_once(':')?;
-        ((qname == "*" || qname == query_name) && cname == column_name)
-            .then_some((o.gleam_type.type_name.as_str(), o.gleam_type.not_null))
-    })
+) -> Option<&'a TypeOverride> {
+    let matching = |wanted: &str| {
+        overrides.iter().find(|o| {
+            o.column
+                .split_once(':')
+                .is_some_and(|(qname, cname)| qname == wanted && cname == column_name)
+        })
+    };
+    matching(query_name).or_else(|| matching("*"))
+}
+
+/// A `?` placeholder in SQLite SQL text.
+#[derive(Debug, PartialEq)]
+enum Placeholder {
+    /// `?`: SQLite numbers it one above the highest number so far.
+    Bare,
+    /// `?N`, which sqlc writes for sqlc.arg() and sqlc.narg().
+    Numbered(i32),
+    /// `/*SLICE:name*/?`, which sqlc writes for sqlc.slice(name).
+    Slice(String),
+}
+
+/// Find the `?` placeholders outside strings, quoted identifiers and comments,
+/// each with the byte range of its `?` or `?N`.
+fn scan_placeholders(sql: &str) -> Vec<(std::ops::Range<usize>, Placeholder)> {
+    let bytes = sql.as_bytes();
+    let find = |from: usize, needle: &str| sql[from..].find(needle).map(|p| from + p);
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                // A doubled quote is an escaped quote: it ends one string
+                // and starts the next, which skips it just the same.
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'[' => i = find(i, "]").map_or(bytes.len(), |end| end + 1),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i = find(i, "\n").map_or(bytes.len(), |end| end + 1)
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let Some(end) = find(i + 2, "*/") else {
+                    break;
+                };
+                let after = end + 2;
+                match sql[i + 2..end].strip_prefix("SLICE:") {
+                    Some(name) if bytes.get(after) == Some(&b'?') => {
+                        found.push((after..after + 1, Placeholder::Slice(name.to_string())));
+                        i = after + 1;
+                    }
+                    _ => i = after,
+                }
+            }
+            b'?' => {
+                let digits = bytes[i + 1..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count();
+                let end = i + 1 + digits;
+                let placeholder = match sql[i + 1..end].parse::<i32>() {
+                    Ok(n) => Placeholder::Numbered(n),
+                    Err(_) => Placeholder::Bare,
+                };
+                found.push((i..end, placeholder));
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    found
+}
+
+/// A query that mixes numbered parameters (`?1`, from sqlc.arg) with
+/// sqlc.slice cannot run as written: the slice becomes one bare `?` per item,
+/// SQLite numbers each bare `?` one above the highest number so far, and
+/// those numbers then collide with the `?N` after it.
+///
+/// For such a query, return its SQL with every `?N` turned into a bare `?`,
+/// and the indexes of `params` in order of appearance (one that appears
+/// twice is listed twice), so every parameter is bound by position.
+/// `None` when the query has no numbered parameter, or when a placeholder
+/// cannot be matched to a parameter; the SQL is then used as sqlc wrote it.
+fn positional_order(
+    sql: &str,
+    query_params: &[Parameter],
+    params: &[ParamInfo],
+) -> Option<(String, Vec<usize>)> {
+    let placeholders = scan_placeholders(sql);
+    if !placeholders
+        .iter()
+        .any(|(_, p)| matches!(p, Placeholder::Numbered(_)))
+    {
+        return None;
+    }
+    let by_number = |n: i32| query_params.iter().position(|p| p.number == n);
+
+    let mut text = String::with_capacity(sql.len());
+    let mut order = Vec::with_capacity(placeholders.len());
+    let mut copied = 0;
+    let mut highest = 0;
+    for (range, placeholder) in placeholders {
+        let index = match placeholder {
+            Placeholder::Numbered(n) => {
+                highest = highest.max(n);
+                by_number(n)?
+            }
+            Placeholder::Slice(name) => {
+                highest += 1;
+                params
+                    .iter()
+                    .position(|p| p.is_slice && p.slice_marker == name)?
+            }
+            Placeholder::Bare => {
+                highest += 1;
+                by_number(highest)?
+            }
+        };
+        order.push(index);
+        text.push_str(&sql[copied..range.start]);
+        text.push('?');
+        copied = range.end;
+    }
+    text.push_str(&sql[copied..]);
+    Some((text, order))
 }
 
 fn deduplicate_name(name: &str, seen: &mut HashMap<String, usize>) -> String {
@@ -580,7 +720,7 @@ fn generate_decoder(columns: &[ColumnInfo], row_type_name: &str, w: &mut CodeWri
 /// Emit `use x_param <- result.try(...)` lines for params that must be prepared
 /// (e.g. UUID strings) and return the params list expression.
 fn emit_params(
-    params: &[ParamInfo],
+    params: &[&ParamInfo],
     var_of: &dyn Fn(&ParamInfo) -> String,
     w: &mut CodeWriter,
     driver: &dyn Driver,
@@ -590,7 +730,7 @@ fn emit_params(
     }
     let has_slices = params.iter().any(|p| p.is_slice);
     let mut parts = Vec::with_capacity(params.len());
-    for p in params {
+    for p in params.iter().copied() {
         let var = var_of(p);
         let rendered = if p.is_slice {
             driver.render_slice_param(&p.resolved.param_expr, &var)
@@ -638,7 +778,7 @@ fn emit_slice_sql(
 
 fn generate_copyfrom_body(
     const_name: &str,
-    params: &[ParamInfo],
+    params: &[&ParamInfo],
     w: &mut CodeWriter,
     driver: &dyn Driver,
 ) {
@@ -1201,6 +1341,219 @@ mod tests {
         let out = render(&q, &table_map, &SqliteDriver::new(&Options::default())).unwrap();
         assert!(out.contains("glite.exec(conn, insert_sql, [glite.text(params.a), glite.nullable(params.b, glite.int)])"), "{out}");
         assert!(!out.contains("Some("), "{out}");
+    }
+
+    fn named(name: &str, original: &str, type_name: &str, not_null: bool, table: &str) -> Column {
+        Column {
+            original_name: original.into(),
+            is_named_param: true,
+            ..make_param_column(name, type_name, not_null, table)
+        }
+    }
+
+    #[test]
+    fn test_params_are_named_after_sqlc_arg() {
+        // WHERE age >= sqlc.arg(min_age) AND age <= sqlc.arg(max_age):
+        // sqlc reports the name in `name` and the column in `original_name`.
+        let table_map = make_table_map("people", vec![make_column("age", "int4", false)]);
+        let q = simple_query(
+            "ByAge",
+            ":many",
+            "SELECT 1 FROM people WHERE age >= $1 AND age <= $2",
+            vec![],
+            vec![
+                Parameter {
+                    number: 1,
+                    column: Some(named("min_age", "age", "int4", true, "people")),
+                },
+                Parameter {
+                    number: 2,
+                    column: Some(named("max_age", "age", "int4", true, "people")),
+                },
+            ],
+        );
+        let out = render(&q, &table_map, &PostgresDriver::new(&Options::default())).unwrap();
+        // Nullability still comes from the column the parameter is used with.
+        assert!(
+            out.contains("ByAgeParams(min_age: Option(Int), max_age: Option(Int))"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_param_is_not_matched_to_a_column_by_name() {
+        // sqlc.arg(bio)::text has no table. A table that happens to have a
+        // nullable `bio` column must not make the parameter optional.
+        let table_map = make_table_map("authors", vec![make_column("bio", "text", false)]);
+        let mut column = named("bio", "", "text", true, "");
+        column.table = None;
+        let q = simple_query(
+            "Search",
+            ":many",
+            "SELECT 1 WHERE $1::text <> ''",
+            vec![],
+            vec![Parameter {
+                number: 1,
+                column: Some(column.clone()),
+            }],
+        );
+        let driver = PostgresDriver::new(&Options::default());
+        let out = render(&q, &table_map, &driver).unwrap();
+        assert!(out.contains("pub fn search(conn, bio: String)"), "{out}");
+
+        // In an INSERT the target column decides, whatever the name.
+        column.name = "biography".into();
+        let mut q = simple_query(
+            "Add",
+            ":exec",
+            "INSERT INTO authors (bio) VALUES ($1::text)",
+            vec![],
+            vec![Parameter {
+                number: 1,
+                column: Some(column),
+            }],
+        );
+        q.insert_into_table = Some(Identifier {
+            name: "authors".into(),
+            ..Default::default()
+        });
+        let out = render(&q, &table_map, &driver).unwrap();
+        assert!(
+            out.contains("pub fn add(conn, biography: Option(String))"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_scan_placeholders_skips_strings_and_comments() {
+        let sql = "SELECT '?1', \"a?\", `b?`, [c?] -- ?2\n/* ?3 */ FROM t WHERE a = ?4 AND b IN (/*SLICE:ids*/?) AND c = ? AND d = 'it''s ?'";
+        let found: Vec<Placeholder> = scan_placeholders(sql).into_iter().map(|(_, p)| p).collect();
+        assert_eq!(
+            found,
+            vec![
+                Placeholder::Numbered(4),
+                Placeholder::Slice("ids".into()),
+                Placeholder::Bare
+            ]
+        );
+    }
+
+    fn sqlite_param(number: i32, name: &str, type_name: &str, slice: bool) -> Parameter {
+        Parameter {
+            number,
+            column: Some(Column {
+                is_sqlc_slice: slice,
+                ..make_param_column(name, type_name, true, "t")
+            }),
+        }
+    }
+
+    #[test]
+    fn test_numbered_params_with_a_slice_are_bound_by_position() {
+        use crate::driver::sqlite::SqliteDriver;
+        let table_map = make_table_map(
+            "t",
+            vec![
+                make_column("id", "integer", true),
+                make_column("name", "text", true),
+            ],
+        );
+        // sqlc.arg(name) twice around a sqlc.slice(ids): expanded as written,
+        // SQLite would number the slice's `?`s 2, 3, ... and clash with ?3.
+        let q = simple_query(
+            "Find",
+            ":many",
+            "SELECT id FROM t WHERE name = ?1 AND id IN (/*SLICE:ids*/?) AND id > ?3 AND name <> ?1",
+            vec![],
+            vec![
+                sqlite_param(1, "name", "text", false),
+                sqlite_param(2, "ids", "integer", true),
+                sqlite_param(3, "min_id", "integer", false),
+            ],
+        );
+        let out = render(&q, &table_map, &SqliteDriver::new(&Options::default())).unwrap();
+        assert!(
+            out.contains(
+                "const find_sql = \"SELECT id FROM t WHERE name = ? AND id IN (/*SLICE:ids*/?) AND id > ? AND name <> ?\""
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "list.flatten([[glite.text(params.name)], list.map(params.ids, glite.int), [glite.int(params.min_id)], [glite.text(params.name)]])"
+            ),
+            "{out}"
+        );
+
+        // Without numbered parameters the SQL is used as sqlc wrote it.
+        let q = simple_query(
+            "Plain",
+            ":many",
+            "SELECT id FROM t WHERE name = ? AND id IN (/*SLICE:ids*/?)",
+            vec![],
+            vec![
+                sqlite_param(1, "name", "text", false),
+                sqlite_param(2, "ids", "integer", true),
+            ],
+        );
+        let out = render(&q, &table_map, &SqliteDriver::new(&Options::default())).unwrap();
+        assert!(
+            out.contains("name = ? AND id IN (/*SLICE:ids*/?)\""),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "list.flatten([[glite.text(params.name)], list.map(params.ids, glite.int)])"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_overrides() {
+        let overrides: Vec<TypeOverride> = serde_json::from_str(
+            r#"[
+                {"column": "*:total", "gleamType": {"type": "Int", "notNull": true}},
+                {"column": "Stats:total", "dbType": {"type": "numeric"}},
+                {"column": "Stats:ids", "dbType": {"type": "int8", "array": true, "notNull": true}}
+            ]"#,
+        )
+        .unwrap();
+        let mut total = make_column("total", "bigint", true);
+        total.table = None;
+        let mut ids = make_column("ids", "anyarray", true);
+        ids.table = None;
+        let driver = PostgresDriver::new(&Options::default());
+        let enums = crate::driver::type_map::EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        let render = |name: &str| {
+            let q = simple_query(
+                name,
+                ":one",
+                "SELECT 1",
+                vec![total.clone(), ids.clone()],
+                vec![],
+            );
+            let mut w = CodeWriter::new();
+            generate_query_fn(&q, &TableMap::new(), &overrides, &ctx, &mut w, &driver).unwrap();
+            w.into_string()
+        };
+        // The override naming the query wins over the `*` one.
+        let out = render("Stats");
+        assert!(
+            out.contains("StatsRow(total: Option(String), ids: List(Int))"),
+            "{out}"
+        );
+        assert!(
+            out.contains("decode.element(0, decode.optional(decode.numeric))"),
+            "{out}"
+        );
+        assert!(
+            out.contains("decode.element(1, decode_array(decode.int))"),
+            "{out}"
+        );
+        let out = render("Other");
+        assert!(out.contains("OtherRow(total: Int, ids: String)"), "{out}");
     }
 
     #[test]

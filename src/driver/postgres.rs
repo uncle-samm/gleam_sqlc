@@ -1,6 +1,9 @@
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::driver::traits::{Driver, path_alias, uses_module};
 use crate::driver::type_map::{
-    GleamType, ParamExpr, ResolvedType, TypeContext, tuple_pattern, value_fn,
+    GleamType, ParamExpr, ResolvedType, Shape, TypeContext, tuple_pattern, value_fn,
 };
 use crate::options::Options;
 use crate::plugin::plugin::Column;
@@ -20,6 +23,12 @@ pub struct PostgresDriver {
     decode_import: String,
     /// Map uuid → String instead of BitArray
     uuid_as_string: bool,
+    /// Type array elements as Option.
+    nullable_array_elements: bool,
+    /// User-declared aliases (lowercase) for types sqlc does not describe.
+    type_aliases: BTreeMap<String, String>,
+    /// Unknown types already warned about, so each is reported once.
+    warned: RefCell<BTreeSet<String>>,
 }
 
 impl PostgresDriver {
@@ -41,7 +50,119 @@ impl PostgresDriver {
             alias,
             decode_import,
             uuid_as_string: options.uuid_as_string,
+            nullable_array_elements: options.nullable_array_elements,
+            type_aliases: options
+                .type_aliases
+                .iter()
+                .map(|(k, v)| (k.to_lowercase(), v.clone()))
+                .collect(),
+            warned: RefCell::new(BTreeSet::new()),
         }
+    }
+
+    /// The type behind a user-declared alias, if there is one.
+    fn alias_target(&self, schema: &str, type_name: &str) -> Option<&str> {
+        let name = type_name.to_lowercase();
+        let qualified = format!("{}.{name}", schema.to_lowercase());
+        self.type_aliases
+            .get(&qualified)
+            .or_else(|| self.type_aliases.get(&name))
+            .map(String::as_str)
+    }
+
+    /// An enum from the catalog or a type postgleam has a codec for.
+    fn enum_or_builtin(
+        &self,
+        schema: &str,
+        type_name: &str,
+        ctx: &TypeContext,
+    ) -> Option<GleamType> {
+        let key = if schema.is_empty() || schema == "public" {
+            type_name.to_string()
+        } else {
+            format!("{schema}.{type_name}")
+        };
+        match (ctx.enums.get(&key), &ctx.enum_qualifier) {
+            // Enums have no binary codec: values travel as text, arrays as
+            // array literals.
+            (Some(info), Some(q)) => Some(GleamType {
+                literal_fn: Some(format!("{q}{}_to_string", info.snake)),
+                ..GleamType::simple(
+                    &format!("{q}{}", info.type_name),
+                    &format!("encode_{}", info.snake),
+                    &format!("decode_{}", info.snake),
+                )
+            }),
+            // Without a models module an enum is a plain String.
+            (Some(_), None) => Some(text_only("decode.text")),
+            (None, _) => pg_known_type(type_name, self.uuid_as_string),
+        }
+    }
+
+    /// A type the user aliased, typically a domain. PostgreSQL describes a
+    /// parameter by the domain's own type, which postgleam has no codec for,
+    /// so parameters are sent as text. Results arrive as the base type.
+    fn aliased(&self, type_name: &str, target: &str, mut base: GleamType) -> GleamType {
+        let text_fn = match base.param_fn.as_str() {
+            "value.Integer" | "value.Oid" => "int_as_text",
+            "value.Float" => "float_as_text",
+            "value.Boolean" => "bool_as_text",
+            "value.Text" | "value.Numeric" | "value.Json" | "value.Jsonb" | "value.Xml"
+            | "value.Jsonpath" => "value.Text",
+            "value.Uuid" if base.uuid_string => "value.Text",
+            // Enums are already sent as text.
+            other if other.starts_with("encode_") => other,
+            other => {
+                if self
+                    .warned
+                    .borrow_mut()
+                    .insert(format!("alias {type_name}"))
+                {
+                    eprintln!(
+                        "warning: typeAliases maps '{type_name}' to '{target}': values of this type can be read, \
+                         but not sent as parameters (postgleam has no text form for {target})."
+                    );
+                }
+                other
+            }
+        };
+        base.param_fn = text_fn.to_string();
+        base.uuid_string = false;
+        base
+    }
+
+    fn base_type(&self, col: &Column, ctx: &TypeContext) -> GleamType {
+        let type_id = col.r#type.as_ref();
+        let type_name = type_id.map(|t| t.name.as_str()).unwrap_or("text");
+        let schema = type_id.map(|t| t.schema.as_str()).unwrap_or("");
+        let known = match self.alias_target(schema, type_name) {
+            // An array of an aliased type arrives as an array literal, so
+            // its elements are read as text.
+            Some(_) if col.is_array => Some(text_only("decode_as_text")),
+            Some(target) => self
+                .enum_or_builtin("", target, ctx)
+                .map(|base| self.aliased(type_name, target, base)),
+            None => self.enum_or_builtin(schema, type_name, ctx),
+        };
+        known.unwrap_or_else(|| {
+            if self.warned.borrow_mut().insert(type_name.to_string()) {
+                eprintln!(
+                    "warning: unknown PostgreSQL type '{type_name}' (e.g. column '{}'): typed as String. \
+                     If that is wrong, name the type it is built on with the typeAliases option, \
+                     or override the column with dbType.",
+                    col.name
+                );
+            }
+            text_only("decode_as_text")
+        })
+    }
+}
+
+/// A type sent and read as text: it has no binary codec in postgleam.
+fn text_only(decoder: &str) -> GleamType {
+    GleamType {
+        literal_fn: Some(String::new()),
+        ..GleamType::simple("String", "value.Text", decoder)
     }
 }
 
@@ -55,11 +176,28 @@ fn call_value(fn_name: &str, arity: u8, var: &str) -> String {
     }
 }
 
-fn array_value(elem_fn: &str, arity: u8, var: &str) -> String {
-    format!(
-        "value.Array(list.map({var}, fn(e) {{ Some({}) }}))",
-        call_value(elem_fn, arity, "e")
-    )
+/// A `value.Value` holding the list `var` as a PostgreSQL array.
+fn array_value(
+    elem_fn: &str,
+    arity: u8,
+    elem_nullable: bool,
+    literal_fn: Option<&str>,
+    var: &str,
+) -> String {
+    match (literal_fn, elem_nullable) {
+        (None, false) => format!(
+            "value.Array(list.map({var}, fn(e) {{ Some({}) }}))",
+            call_value(elem_fn, arity, "e")
+        ),
+        (None, true) => format!(
+            "value.Array(list.map({var}, option.map(_, {})))",
+            value_fn(elem_fn, arity)
+        ),
+        (Some(""), false) => format!("array_literal(list.map({var}, Some))"),
+        (Some(""), true) => format!("array_literal({var})"),
+        (Some(f), false) => format!("array_literal(list.map({var}, fn(e) {{ Some({f}(e)) }}))"),
+        (Some(f), true) => format!("array_literal(list.map({var}, option.map(_, {f})))"),
+    }
 }
 
 impl Driver for PostgresDriver {
@@ -76,29 +214,33 @@ impl Driver for PostgresDriver {
     }
 
     fn resolve_column_type(&self, col: &Column, ctx: &TypeContext) -> ResolvedType {
-        let type_id = col.r#type.as_ref();
-        let type_name = type_id.map(|t| t.name.as_str()).unwrap_or("text");
-        let schema = type_id.map(|t| t.schema.as_str()).unwrap_or("");
-
-        let enum_info = ctx.enum_qualifier.as_ref().and_then(|q| {
-            let key = if schema.is_empty() || schema == "public" {
-                type_name.to_string()
-            } else {
-                format!("{schema}.{type_name}")
-            };
-            ctx.enums.get(&key).map(|info| (q, info))
-        });
-
-        let base = match enum_info {
-            Some((q, info)) => GleamType::simple(
-                &format!("{q}{}", info.type_name),
-                &format!("encode_{}", info.snake),
-                &format!("decode_{}", info.snake),
-            ),
-            None => pg_type_to_gleam(type_name, self.uuid_as_string),
+        let mut base = self.base_type(col, ctx);
+        // sqlc picks an aggregate's type without looking at its argument:
+        // sum(bigint) and avg(integer) are numerics in PostgreSQL, but typed
+        // as bigint and double precision. Read such results leniently.
+        if col.is_func_call && !col.is_array {
+            match base.decoder_fn.as_str() {
+                "decode.int" => base.decoder_fn = "decode_number_as_int".into(),
+                "decode.float" => base.decoder_fn = "decode_number_as_float".into(),
+                _ => {}
+            }
+        }
+        let shape = Shape {
+            nullable: !col.not_null,
+            array: col.is_array,
+            elem_nullable: col.is_array && self.nullable_array_elements,
         };
-        let array_decoder = format!("decode_array({})", base.decoder_fn);
-        ResolvedType::from_base(base, !col.not_null, col.is_array, Some(array_decoder))
+        let array_decoder = if shape.elem_nullable {
+            format!("decode_array(decode.optional({}))", base.decoder_fn)
+        } else {
+            format!("decode_array({})", base.decoder_fn)
+        };
+        ResolvedType::from_base(base, shape, Some(array_decoder))
+    }
+
+    fn knows_type(&self, type_name: &str, ctx: &TypeContext) -> bool {
+        self.alias_target("", type_name).is_some()
+            || self.enum_or_builtin("", type_name, ctx).is_some()
     }
 
     fn override_base(&self, type_name: &str) -> GleamType {
@@ -133,19 +275,18 @@ impl Driver for PostgresDriver {
             ParamExpr::Array {
                 elem_fn,
                 arity,
-                nullable: false,
+                nullable,
+                elem_nullable,
+                literal_fn,
             } => {
-                format!("Some({})", array_value(elem_fn, *arity, var))
-            }
-            ParamExpr::Array {
-                elem_fn,
-                arity,
-                nullable: true,
-            } => {
-                format!(
-                    "option.map({var}, fn(l) {{ {} }})",
-                    array_value(elem_fn, *arity, "l")
-                )
+                let array = |v: &str| {
+                    array_value(elem_fn, *arity, *elem_nullable, literal_fn.as_deref(), v)
+                };
+                if *nullable {
+                    format!("option.map({var}, fn(l) {{ {} }})", array("l"))
+                } else {
+                    format!("Some({})", array(var))
+                }
             }
             // Prepared by `prepare_param`; `var` is already the bound Param.
             ParamExpr::UuidString { .. } => var.to_string(),
@@ -153,14 +294,25 @@ impl Driver for PostgresDriver {
     }
 
     fn prepare_param(&self, expr: &ParamExpr, var: &str) -> Option<String> {
-        let ParamExpr::UuidString { nullable, array } = expr else {
+        let ParamExpr::UuidString {
+            nullable,
+            array,
+            elem_nullable,
+        } = expr
+        else {
             return None;
         };
         let single = |v: &str| format!("uuid_param({v}) |> result.map(Some)");
         let many = |v: &str| {
-            format!(
-                "list.try_map({v}, uuid_param) |> result.map(fn(vs) {{ Some(value.Array(list.map(vs, Some))) }})"
-            )
+            if *elem_nullable {
+                format!(
+                    "list.try_map({v}, fn(e) {{ case e {{ option.Some(s) -> uuid_param(s) |> result.map(Some)  option.None -> Ok(None) }} }}) |> result.map(fn(vs) {{ Some(value.Array(vs)) }})"
+                )
+            } else {
+                format!(
+                    "list.try_map({v}, uuid_param) |> result.map(fn(vs) {{ Some(value.Array(list.map(vs, Some))) }})"
+                )
+            }
         };
         let inner = if *array { many("u") } else { single("u") };
         Some(match nullable {
@@ -219,19 +371,30 @@ impl Driver for PostgresDriver {
             w.line("  |> result.replace_error(error.EncodeError(\"invalid UUID: \" <> uuid))");
             w.line("}");
         }
-        if body.contains("decode_array(") {
+        let mut block = |w: &mut CodeWriter, text: &str| {
             sep(w);
-            w.line("fn decode_array(");
-            w.line("  inner: fn(Option(value.Value)) -> Result(a, error.Error),");
-            w.line(") -> fn(Option(value.Value)) -> Result(List(a), error.Error) {");
-            w.line("  fn(v) {");
-            w.line("    case v {");
-            w.line("      Some(value.Array(items)) -> list.try_map(items, inner)");
-            w.line("      Some(_) -> Error(error.DecodeError(\"expected an array\"))");
-            w.line("      None -> Error(error.DecodeError(\"unexpected NULL array\"))");
-            w.line("    }");
-            w.line("  }");
-            w.line("}");
+            for line in text.trim_matches('\n').lines() {
+                w.line(line);
+            }
+        };
+        if body.contains("array_literal(") {
+            block(w, ARRAY_LITERAL);
+        }
+        if body.contains("decode_array(") {
+            block(w, DECODE_ARRAY);
+        }
+        for (name, text) in [
+            ("decode_number_as_int", DECODE_NUMBER_AS_INT),
+            ("decode_number_as_float", DECODE_NUMBER_AS_FLOAT),
+            ("decode_as_text", DECODE_AS_TEXT),
+            ("decode_oid", DECODE_OID),
+            ("int_as_text", INT_AS_TEXT),
+            ("float_as_text", FLOAT_AS_TEXT),
+            ("bool_as_text", BOOL_AS_TEXT),
+        ] {
+            if uses_fn(body, name) {
+                block(w, text);
+            }
         }
         let Some(q) = &ctx.enum_qualifier else {
             return;
@@ -300,6 +463,189 @@ impl Driver for PostgresDriver {
     }
 }
 
+const ARRAY_LITERAL: &str = r#"
+/// Arrays of enums and of other types without a binary codec are sent as an
+/// array literal such as `{"a","b",NULL}`.
+fn array_literal(items: List(Option(String))) -> value.Value {
+  let quoted =
+    list.map(items, fn(item) {
+      case item {
+        Some(s) ->
+          "\""
+          <> string.replace(string.replace(s, "\\", "\\\\"), "\"", "\\\"")
+          <> "\""
+        None -> "NULL"
+      }
+    })
+  value.Text("{" <> string.join(quoted, ",") <> "}")
+}
+"#;
+
+const DECODE_ARRAY: &str = r#"
+fn decode_array(
+  inner: fn(Option(value.Value)) -> Result(a, error.Error),
+) -> fn(Option(value.Value)) -> Result(List(a), error.Error) {
+  fn(v) {
+    case v {
+      Some(value.Array(items)) -> decode_items(items, inner)
+      // Arrays of enums and of other types without a binary codec arrive as
+      // an array literal.
+      Some(value.Text(literal)) -> {
+        use items <- result.try(parse_array_literal(literal))
+        decode_items(list.map(items, option.map(_, value.Text)), inner)
+      }
+      Some(_) -> Error(error.DecodeError("expected an array"))
+      None -> Error(error.DecodeError("unexpected NULL array"))
+    }
+  }
+}
+
+fn decode_items(
+  items: List(Option(value.Value)),
+  inner: fn(Option(value.Value)) -> Result(a, error.Error),
+) -> Result(List(a), error.Error) {
+  list.try_map(items, fn(item) {
+    case item, inner(item) {
+      _, Ok(decoded) -> Ok(decoded)
+      None, Error(_) ->
+        Error(error.DecodeError(
+          "the array holds a NULL; set the nullableArrayElements option of sqlc-gen-gleam to read such arrays",
+        ))
+      Some(_), Error(e) -> Error(e)
+    }
+  })
+}
+
+/// Parse a one-dimensional array literal such as `{a,"b c",NULL}`.
+fn parse_array_literal(
+  literal: String,
+) -> Result(List(Option(String)), error.Error) {
+  let bad = Error(error.DecodeError("expected an array, got " <> literal))
+  case string.starts_with(literal, "{") && string.ends_with(literal, "}") {
+    False -> bad
+    True ->
+      case string.slice(literal, 1, string.length(literal) - 2) {
+        "" -> Ok([])
+        body ->
+          case array_items(string.to_graphemes(body), "", False, False, []) {
+            Ok(items) -> Ok(items)
+            Error(Nil) -> bad
+          }
+      }
+  }
+}
+
+fn array_items(
+  chars: List(String),
+  item: String,
+  quoted: Bool,
+  in_quotes: Bool,
+  acc: List(Option(String)),
+) -> Result(List(Option(String)), Nil) {
+  // An unquoted NULL is a missing element; a quoted one is the text "NULL".
+  let finish = fn() {
+    case quoted, string.uppercase(item) {
+      False, "NULL" -> None
+      _, _ -> Some(item)
+    }
+  }
+  case chars, in_quotes {
+    [], True -> Error(Nil)
+    [], False -> Ok(list.reverse([finish(), ..acc]))
+    ["\\", c, ..rest], _ -> array_items(rest, item <> c, quoted, in_quotes, acc)
+    ["\"", ..rest], _ -> array_items(rest, item, True, !in_quotes, acc)
+    [",", ..rest], False -> array_items(rest, "", False, False, [finish(), ..acc])
+    // Nested arrays are not supported.
+    ["{", ..], False -> Error(Nil)
+    [c, ..rest], _ -> array_items(rest, item <> c, quoted, in_quotes, acc)
+  }
+}
+"#;
+
+const DECODE_NUMBER_AS_INT: &str = r#"
+/// sqlc types sum() and similar aggregates as an integer where PostgreSQL
+/// may answer with a numeric; a whole numeric is read as an Int.
+fn decode_number_as_int(v: Option(value.Value)) -> Result(Int, error.Error) {
+  case v {
+    Some(value.Numeric(digits)) ->
+      int.parse(digits)
+      |> result.replace_error(error.DecodeError(
+        "Expected Integer, got Numeric "
+        <> digits
+        <> "; override the column with dbType numeric in the sqlc-gen-gleam options",
+      ))
+    _ -> decode.int(v)
+  }
+}
+"#;
+
+const DECODE_NUMBER_AS_FLOAT: &str = r#"
+/// sqlc types avg() and similar aggregates as a float where PostgreSQL may
+/// answer with a numeric or an integer.
+fn decode_number_as_float(v: Option(value.Value)) -> Result(Float, error.Error) {
+  case v {
+    Some(value.Integer(n)) -> Ok(int.to_float(n))
+    Some(value.Numeric(digits)) ->
+      case float.parse(digits), int.parse(digits) {
+        Ok(f), _ -> Ok(f)
+        _, Ok(n) -> Ok(int.to_float(n))
+        _, _ ->
+          Error(error.DecodeError("Expected Float, got Numeric " <> digits))
+      }
+    _ -> decode.float(v)
+  }
+}
+"#;
+
+const DECODE_AS_TEXT: &str = r#"
+/// A type this plugin does not know is read as text, whichever way
+/// PostgreSQL sends it (a domain arrives as the type it is built on).
+fn decode_as_text(v: Option(value.Value)) -> Result(String, error.Error) {
+  case v {
+    Some(value.Integer(n)) | Some(value.Oid(n)) -> Ok(int.to_string(n))
+    Some(value.Float(f)) -> Ok(float.to_string(f))
+    Some(value.Numeric(digits)) -> Ok(digits)
+    _ -> decode.text(v)
+  }
+}
+"#;
+
+const DECODE_OID: &str = r#"
+fn decode_oid(v: Option(value.Value)) -> Result(Int, error.Error) {
+  case v {
+    Some(value.Oid(n)) -> Ok(n)
+    _ -> decode.int(v)
+  }
+}
+"#;
+
+const INT_AS_TEXT: &str = r#"
+/// A parameter of an aliased type (a domain) is sent as text: postgleam has
+/// no codec for the domain's own type.
+fn int_as_text(v: Int) -> value.Value {
+  value.Text(int.to_string(v))
+}
+"#;
+
+const FLOAT_AS_TEXT: &str = r#"
+/// A parameter of an aliased type (a domain) is sent as text: postgleam has
+/// no codec for the domain's own type.
+fn float_as_text(v: Float) -> value.Value {
+  value.Text(float.to_string(v))
+}
+"#;
+
+const BOOL_AS_TEXT: &str = r#"
+/// A parameter of an aliased type (a domain) is sent as text: postgleam has
+/// no codec for the domain's own type.
+fn bool_as_text(v: Bool) -> value.Value {
+  case v {
+    True -> value.Text("true")
+    False -> value.Text("false")
+  }
+}
+"#;
+
 /// True if `body` calls the named private function.
 fn uses_fn(body: &str, name: &str) -> bool {
     let needle = format!("{name}(");
@@ -307,10 +653,16 @@ fn uses_fn(body: &str, name: &str) -> bool {
     body.contains(&needle) || body.contains(&bare) || body.contains(&format!("{name},"))
 }
 
-/// Map a PostgreSQL type name to Gleam type info.
-/// The `module` parameter is the module alias used in param constructors
-/// (e.g., "postgleam" or "pg").
+/// Map a PostgreSQL type name to Gleam type info, falling back to String for
+/// a type this plugin does not know.
+#[cfg(test)]
 fn pg_type_to_gleam(pg_type: &str, uuid_as_string: bool) -> GleamType {
+    pg_known_type(pg_type, uuid_as_string).unwrap_or_else(|| text_only("decode_as_text"))
+}
+
+/// Map a PostgreSQL type name to Gleam type info. `None` for a type this
+/// plugin does not know.
+fn pg_known_type(pg_type: &str, uuid_as_string: bool) -> Option<GleamType> {
     // Strip pg_catalog. prefix if present
     let type_name = pg_type
         .strip_prefix("pg_catalog.")
@@ -321,7 +673,7 @@ fn pg_type_to_gleam(pg_type: &str, uuid_as_string: bool) -> GleamType {
     // wrapped in Some() for pool queries that take List(Option(Value)).
     // The param_fn generates e.g. "Some(value.Text(val))" via the ParamExpr rendering.
 
-    match type_name.as_str() {
+    Some(match type_name.as_str() {
         // Boolean
         "bool" | "boolean" => GleamType::simple("Bool", "value.Boolean", "decode.bool"),
 
@@ -435,17 +787,16 @@ fn pg_type_to_gleam(pg_type: &str, uuid_as_string: bool) -> GleamType {
         ),
 
         // Full-text search (no binary codec support in PostGleam yet)
-        "tsvector" | "tsquery" => GleamType::simple("String", "value.Text", "decode.text"),
+        "tsvector" | "tsquery" => text_only("decode.text"),
+
+        // Object identifiers
+        "oid" => GleamType::simple("Int", "value.Oid", "decode_oid"),
 
         // Void (for functions returning void)
-        "void" => GleamType::simple("Nil", "fn(_) { value.Null }", "fn(_) { Ok(Nil) }"),
+        "void" => GleamType::simple("Nil", "fn(_) { value.Void }", "fn(_) { Ok(Nil) }"),
 
-        // Unknown — fall back to String
-        _ => {
-            eprintln!("warning: unknown PostgreSQL type '{pg_type}', falling back to String");
-            GleamType::simple("String", "value.Text", "decode.text")
-        }
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -485,7 +836,7 @@ mod tests {
         let t = pg_type_to_gleam("any", false);
         assert_eq!(t.type_name, "String");
         assert_eq!(t.param_fn, "value.Text");
-        assert_eq!(t.decoder_fn, "decode.text");
+        assert_eq!(t.decoder_fn, "decode_as_text");
     }
 
     #[test]
@@ -710,6 +1061,137 @@ mod tests {
     }
 
     #[test]
+    fn test_nullable_array_elements() {
+        let driver = PostgresDriver::new(&Options {
+            nullable_array_elements: true,
+            uuid_as_string: true,
+            ..Default::default()
+        });
+        let enums = EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        let resolved = driver.resolve_column_type(&col("int8", true, true), &ctx);
+        assert_eq!(resolved.type_expr, "List(Option(Int))");
+        assert_eq!(
+            resolved.decoder_expr.to_gleam(),
+            "decode_array(decode.optional(decode.int))"
+        );
+        assert_eq!(
+            driver.render_param(&resolved.param_expr, "ids"),
+            "Some(value.Array(list.map(ids, option.map(_, value.Integer))))"
+        );
+        // Scalars are not affected.
+        let resolved = driver.resolve_column_type(&col("int8", true, false), &ctx);
+        assert_eq!(resolved.type_expr, "Int");
+
+        let resolved = driver.resolve_column_type(&col("uuid", true, true), &ctx);
+        assert_eq!(resolved.type_expr, "List(Option(String))");
+        let prepared = driver.prepare_param(&resolved.param_expr, "ids").unwrap();
+        assert!(
+            prepared.contains("option.None -> Ok(None)")
+                && prepared.ends_with("Some(value.Array(vs)) })"),
+            "{prepared}"
+        );
+    }
+
+    #[test]
+    fn test_function_results_are_read_leniently() {
+        let driver = PostgresDriver::new(&Options::default());
+        let enums = EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+        let func = |type_name: &str| Column {
+            is_func_call: true,
+            ..col(type_name, true, false)
+        };
+        let decoder = |c: &Column| driver.resolve_column_type(c, &ctx).decoder_expr.to_gleam();
+        assert_eq!(decoder(&func("bigint")), "decode_number_as_int");
+        assert_eq!(decoder(&func("double precision")), "decode_number_as_float");
+        assert_eq!(decoder(&func("text")), "decode.text");
+        // A table column is read strictly.
+        assert_eq!(decoder(&col("bigint", true, false)), "decode.int");
+    }
+
+    #[test]
+    fn test_unknown_types_and_aliases() {
+        let enums = EnumMap::new();
+        let ctx = TypeContext::without_enums(&enums);
+
+        // An unknown type (a domain, say) is text both ways.
+        let driver = PostgresDriver::new(&Options::default());
+        assert!(!driver.knows_type("posint", &ctx));
+        assert!(driver.knows_type("pg_catalog.int4", &ctx));
+        let resolved = driver.resolve_column_type(&col("posint", true, false), &ctx);
+        assert_eq!(resolved.type_expr, "String");
+        assert_eq!(resolved.decoder_expr.to_gleam(), "decode_as_text");
+        assert_eq!(
+            driver.render_param(&resolved.param_expr, "n"),
+            "Some(value.Text(n))"
+        );
+        // Its arrays travel as array literals.
+        let resolved = driver.resolve_column_type(&col("posint", false, true), &ctx);
+        assert_eq!(resolved.type_expr, "Option(List(String))");
+        assert_eq!(
+            resolved.decoder_expr.to_gleam(),
+            "decode.optional(decode_array(decode_as_text))"
+        );
+        assert_eq!(
+            driver.render_param(&resolved.param_expr, "ns"),
+            "option.map(ns, fn(l) { array_literal(list.map(l, Some)) })"
+        );
+
+        // With an alias it has the type it is built on; parameters are sent
+        // as text because postgleam has no codec for the domain itself.
+        let driver = PostgresDriver::new(&Options {
+            type_aliases: [("PosInt".to_string(), "integer".to_string())].into(),
+            ..Default::default()
+        });
+        assert!(driver.knows_type("posint", &ctx));
+        let resolved = driver.resolve_column_type(&col("posint", true, false), &ctx);
+        assert_eq!(resolved.type_expr, "Int");
+        assert_eq!(resolved.decoder_expr.to_gleam(), "decode.int");
+        assert_eq!(
+            driver.render_param(&resolved.param_expr, "n"),
+            "Some(int_as_text(n))"
+        );
+        let resolved = driver.resolve_column_type(&col("posint", true, true), &ctx);
+        assert_eq!(resolved.type_expr, "List(String)");
+
+        let mut w = CodeWriter::new();
+        driver.write_helpers(
+            "[Some(int_as_text(n))]\ndecode.element(0, decode_as_text)\ndecode_array(decode.int)\narray_literal(x)",
+            &ctx,
+            &mut w,
+        );
+        let helpers = w.into_string();
+        for name in [
+            "fn int_as_text(",
+            "fn decode_as_text(",
+            "fn decode_array(",
+            "fn parse_array_literal(",
+            "fn array_literal(",
+        ] {
+            assert!(helpers.contains(name), "{name} missing in:\n{helpers}");
+        }
+        assert!(!helpers.contains("fn decode_oid("), "{helpers}");
+    }
+
+    #[test]
+    fn test_oid_and_void() {
+        let t = pg_type_to_gleam("oid", false);
+        assert_eq!(
+            (
+                t.type_name.as_str(),
+                t.param_fn.as_str(),
+                t.decoder_fn.as_str()
+            ),
+            ("Int", "value.Oid", "decode_oid")
+        );
+        // value.Null does not exist in postgleam; value.Void does.
+        let t = pg_type_to_gleam("void", false);
+        assert_eq!(t.type_name, "Nil");
+        assert_eq!(t.param_fn, "fn(_) { value.Void }");
+    }
+
+    #[test]
     fn test_custom_module_driver() {
         let options = Options {
             module: Some("db/pg".to_string()),
@@ -814,9 +1296,26 @@ mod tests {
             driver.render_param(&resolved.param_expr, "s"),
             "Some(encode_status(s))"
         );
+        // An enum array has no binary codec: it is an array literal.
+        let resolved = driver.resolve_column_type(&col("status", true, true), &ctx);
+        assert_eq!(resolved.type_expr, "List(models.Status)");
+        assert_eq!(
+            resolved.decoder_expr.to_gleam(),
+            "decode_array(decode_status)"
+        );
+        assert_eq!(
+            driver.render_param(&resolved.param_expr, "s"),
+            "Some(array_literal(list.map(s, fn(e) { Some(models.status_to_string(e)) })))"
+        );
         // Without a models module, enums are plain strings.
         let ctx = TypeContext::without_enums(&enums);
         let resolved = driver.resolve_column_type(&col("status", true, false), &ctx);
         assert_eq!(resolved.type_expr, "String");
+        assert_eq!(resolved.decoder_expr.to_gleam(), "decode.text");
+        let resolved = driver.resolve_column_type(&col("status", true, true), &ctx);
+        assert_eq!(
+            driver.render_param(&resolved.param_expr, "s"),
+            "Some(array_literal(list.map(s, Some)))"
+        );
     }
 }

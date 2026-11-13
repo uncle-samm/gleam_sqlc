@@ -1,14 +1,15 @@
 // End-to-end tests for sqlc-gen-gleam generated SQLite code.
 // These tests run against an in-memory SQLite database via glite.
 
+import generated/query
+import generated/tx/query as tx_query
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import gleeunit
 import gleeunit/should
 import glite
 import glite/config
-import generated/query
-import generated/tx/query as tx_query
 
 pub fn main() {
   gleeunit.main()
@@ -38,6 +39,12 @@ fn setup(conn) {
   glite.exec(
     conn,
     "CREATE TABLE IF NOT EXISTS types_sqlite (c_integer INTEGER, c_real REAL, c_text TEXT, c_blob BLOB)",
+    [],
+  )
+  |> should.be_ok()
+  glite.exec(
+    conn,
+    "CREATE TABLE IF NOT EXISTS types_sqlite_affinity (id INTEGER PRIMARY KEY, c_numeric NUMERIC NOT NULL DEFAULT 0, c_decimal DECIMAL(10, 2), c_boolean BOOLEAN NOT NULL DEFAULT 0, c_date DATE, c_datetime DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, c_timestamp TIMESTAMP, c_varchar VARCHAR(20), c_bigint BIGINT, c_double DOUBLE PRECISION, c_untyped)",
     [],
   )
   |> should.be_ok()
@@ -212,8 +219,7 @@ pub fn test_narg_null_test() {
   |> should.be_ok()
 
   // With None pattern, COALESCE defaults to '%' — matches all
-  let result =
-    query.get_author_by_name_pattern(conn, None) |> should.be_ok()
+  let result = query.get_author_by_name_pattern(conn, None) |> should.be_ok()
   should.equal(list.length(result), 2)
 
   cleanup(conn)
@@ -525,10 +531,10 @@ pub fn test_multiple_slices_test() {
   let result =
     query.get_authors_by_ids_and_names(
       conn,
-      query.GetAuthorsByIdsAndNamesParams(
-        id: [1, 2, 3],
-        name: ["Alpha", "Gamma"],
-      ),
+      query.GetAuthorsByIdsAndNamesParams(ids: [1, 2, 3], names: [
+        "Alpha",
+        "Gamma",
+      ]),
     )
     |> should.be_ok()
   should.equal(list.length(result), 2)
@@ -607,6 +613,161 @@ pub fn test_type_override_test() {
   should.equal(result.max_text, "override test")
 
   query.delete_all_sqlite_types(conn) |> should.be_ok()
+  glite.disconnect(conn)
+}
+
+// ============================================================
+// Declared types with NUMERIC affinity
+// ============================================================
+
+fn affinity(
+  numeric: Float,
+  bigint: Int,
+  label: String,
+) -> query.InsertSqliteAffinityParams {
+  query.InsertSqliteAffinityParams(
+    c_numeric: numeric,
+    c_decimal: Some(3.0),
+    c_boolean: True,
+    c_date: Some("2026-01-02"),
+    c_timestamp: Some("1700000000"),
+    c_varchar: Some(label),
+    c_bigint: Some(bigint),
+    c_double: Some(2.0),
+    c_untyped: Some("42"),
+  )
+}
+
+// NUMERIC and DECIMAL columns are floats, read back whether SQLite stored
+// an INTEGER or a REAL. Date and time columns are strings, read back even
+// when the text looked like a number and was stored as one.
+pub fn numeric_affinity_round_trip_test() {
+  let conn = connect()
+  setup(conn)
+
+  let row =
+    query.insert_sqlite_affinity(conn, affinity(12.5, 9_000_000_000, "x"))
+    |> should.be_ok()
+  should.equal(row.c_numeric, 12.5)
+  // 3.0 is stored as the integer 3.
+  should.equal(row.c_decimal, Some(3.0))
+  should.equal(row.c_boolean, True)
+  should.equal(row.c_date, Some("2026-01-02"))
+  // "1700000000" is stored as an integer.
+  should.equal(row.c_timestamp, Some("1700000000"))
+  should.equal(row.c_varchar, Some("x"))
+  should.equal(row.c_bigint, Some(9_000_000_000))
+  should.equal(row.c_double, Some(2.0))
+  should.equal(row.c_untyped, Some("42"))
+  // The CURRENT_TIMESTAMP default: "YYYY-MM-DD HH:MM:SS".
+  should.equal(string.length(row.c_datetime), 19)
+
+  let whole =
+    query.insert_sqlite_affinity(
+      conn,
+      query.InsertSqliteAffinityParams(
+        c_numeric: 2.0,
+        c_decimal: None,
+        c_boolean: False,
+        c_date: None,
+        c_timestamp: None,
+        c_varchar: None,
+        c_bigint: None,
+        c_double: None,
+        c_untyped: None,
+      ),
+    )
+    |> should.be_ok()
+  should.equal(whole.c_numeric, 2.0)
+  should.equal(whole.c_decimal, None)
+
+  let read = query.get_sqlite_affinity(conn, row.id) |> should.be_ok()
+  should.equal(read.c_numeric, 12.5)
+  should.equal(read.c_decimal, Some(3.0))
+  should.equal(read.c_timestamp, Some("1700000000"))
+
+  // The same queries inside a transaction.
+  let in_tx =
+    glite.transaction(conn, glite.Immediate, fn(tx) {
+      tx_query.insert_sqlite_affinity(
+        tx,
+        tx_query.InsertSqliteAffinityParams(
+          c_numeric: 7.0,
+          c_decimal: Some(0.25),
+          c_boolean: True,
+          c_date: None,
+          c_timestamp: None,
+          c_varchar: None,
+          c_bigint: None,
+          c_double: None,
+          c_untyped: None,
+        ),
+      )
+    })
+    |> should.be_ok()
+  should.equal(in_tx.c_numeric, 7.0)
+  should.equal(in_tx.c_decimal, Some(0.25))
+
+  glite.disconnect(conn)
+}
+
+// sum() of whole numbers is an INTEGER and max() of a DATETIME column has
+// no declared type; both are read without an override.
+pub fn sqlite_aggregates_test() {
+  let conn = connect()
+  setup(conn)
+
+  let empty = query.get_sqlite_affinity_aggregates(conn) |> should.be_ok()
+  should.equal(empty.cnt, 0)
+  should.equal(empty.sum_numeric, None)
+  should.equal(empty.max_datetime, None)
+  should.equal(empty.total_bigint, 0.0)
+
+  query.insert_sqlite_affinity(conn, affinity(2.0, 10, "a")) |> should.be_ok()
+  query.insert_sqlite_affinity(conn, affinity(3.0, 20, "b")) |> should.be_ok()
+
+  let stats = query.get_sqlite_affinity_aggregates(conn) |> should.be_ok()
+  should.equal(stats.cnt, 2)
+  should.equal(stats.sum_numeric, Some(5.0))
+  should.equal(stats.avg_bigint, Some(15.0))
+  should.equal(stats.total_bigint, 30.0)
+  let assert Some(latest) = stats.max_datetime
+  should.equal(string.length(latest), 19)
+
+  glite.disconnect(conn)
+}
+
+// sqlc.arg() and sqlc.slice() in one query: the parameters keep the names
+// from the SQL, and the slice may hold any number of items, even though
+// sqlc numbers the other parameters (?1, ?3, ?4) around it.
+pub fn named_params_with_slice_test() {
+  let conn = connect()
+  setup(conn)
+  query.insert_sqlite_affinity(conn, affinity(1.0, 1, "a")) |> should.be_ok()
+  query.insert_sqlite_affinity(conn, affinity(2.0, 2, "b")) |> should.be_ok()
+  query.insert_sqlite_affinity(conn, affinity(3.0, 3, "a")) |> should.be_ok()
+
+  let find = fn(ids, min_numeric, label) {
+    query.get_sqlite_affinity_by_ids(
+      conn,
+      query.GetSqliteAffinityByIdsParams(
+        flag: True,
+        ids: ids,
+        min_numeric: min_numeric,
+        label: Some(label),
+      ),
+    )
+    |> should.be_ok()
+    |> list.map(fn(r) { r.id })
+  }
+  should.equal(find([1, 2, 3], 0.0, "a"), [1, 3])
+  should.equal(find([1, 2, 3], 2.5, "a"), [3])
+  should.equal(find([1, 2], 0.0, "b"), [2])
+  should.equal(find([3], 0.0, "a"), [3])
+  should.equal(find([], 0.0, "a"), [])
+  // The text inside the SQL string literal is not a parameter.
+  should.equal(find([1, 2, 3], 0.0, "?1 -- not a parameter"), [1, 2, 3])
+
   glite.disconnect(conn)
 }
 
