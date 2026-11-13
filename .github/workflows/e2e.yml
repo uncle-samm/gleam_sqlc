@@ -42,6 +42,9 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: "29.x"
+          # Without a token the action looks up the release anonymously, and
+          # fails when the runner's address is over GitHub's rate limit.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install sqlc
         uses: sqlc-dev/setup-sqlc@v4
