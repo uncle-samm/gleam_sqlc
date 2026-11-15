@@ -26,7 +26,7 @@ version: "2"
 plugins:
   - name: gleam
     wasm:
-      url: https://github.com/uncle-samm/gleam_sqlc/releases/download/v0.9.0/sqlc-gen-gleam.wasm
+      url: https://github.com/uncle-samm/gleam_sqlc/releases/download/v0.10.0/sqlc-gen-gleam.wasm
       sha256: "<contents of sqlc-gen-gleam.wasm.sha256 for that release>"
 sql:
   - schema: "schema.sql"
